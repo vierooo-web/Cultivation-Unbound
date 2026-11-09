@@ -58,7 +58,7 @@ end
 loadConfig()
 
 -------------------------------------------------------------------------
--- CENTRALIZED STATE & CONSTANTS (ANTI-REGISTER LIMIT)
+-- CENTRALIZED STATE & CONSTANTS (ANTI-REGISTER LIMIT < 35 LOCALS)
 -------------------------------------------------------------------------
 local State = {
     isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
@@ -87,7 +87,14 @@ local State = {
     toggleKey = Enum.KeyCode[Config.toggleKeyName] or Enum.KeyCode.RightShift,
     trialNodesData = {},
     lastSkillCycleTime = 0,
-    skillIndex = 1
+    skillIndex = 1,
+    -- Pelacak aktivitas kultivasi agar tombol M dan P tidak ditekan berulang-ulang saat sudah aktif
+    lastQiGainTick = 0,
+    lastBodyGainTick = 0,
+    lastProgressText = "",
+    lastRealmKeyPress = 0,
+    lastBodyKeyPress = 0,
+    zoneCache = {}
 }
 
 local Constants = {
@@ -229,6 +236,13 @@ local function createToggleRow(parent, posY, labelText, initialState, activeColo
     local onCol = activeColor or Color3.fromRGB(60, 180, 80)
     local offCol = Color3.fromRGB(60, 50, 65)
 
+    local currentState = initialState
+    local function setVisual(st)
+        currentState = st
+        TweenService:Create(switchBg, TweenInfo.new(0.2), {BackgroundColor3 = st and onCol or offCol}):Play()
+        TweenService:Create(switchCircle, TweenInfo.new(0.2), {Position = st and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    end
+
     switchBg.BackgroundColor3 = initialState and onCol or offCol
     switchCircle.Position = initialState and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
 
@@ -239,21 +253,22 @@ local function createToggleRow(parent, posY, labelText, initialState, activeColo
     trigger.ZIndex = 2
     trigger.Parent = container
 
-    local currentState = initialState
     trigger.Activated:Connect(function()
-        currentState = not currentState
-        TweenService:Create(switchBg, TweenInfo.new(0.2), {BackgroundColor3 = currentState and onCol or offCol}):Play()
-        TweenService:Create(switchCircle, TweenInfo.new(0.2), {Position = currentState and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+        setVisual(not currentState)
         if onToggle then
             onToggle(currentState)
         end
     end)
 
-    return container
+    return container, setVisual
 end
 
 local function trimText(str)
     return (str or ""):match("^%s*(.-)%s*$"):lower()
+end
+
+local function normalizeName(str)
+    return (str or ""):lower():gsub("[%s%p_]+", "")
 end
 
 local function isUserTypingOrInMenu()
@@ -330,13 +345,13 @@ local function triggerKeyPress(charStr)
 
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
-        task.wait(0.01)
+        task.wait(0.02)
         VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
     end)
 end
 
 -------------------------------------------------------------------------
--- BUILD MAIN WINDOW & SIDEBAR (SCOPED BLOCK TO FREE REGISTERS)
+-- BUILD MAIN WINDOW & SIDEBAR
 -------------------------------------------------------------------------
 do
     local screenGui = Instance.new("ScreenGui")
@@ -373,8 +388,6 @@ do
 
     local frameW = State.isMobile and 440 or 540
     local frameH = State.isMobile and 340 or 470
-    UI.FrameW = frameW
-    UI.FrameH = frameH
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
@@ -538,7 +551,7 @@ do
 end
 
 -------------------------------------------------------------------------
--- BUILD PAGE 1: AUTO CATALOG (SCOPED BLOCK)
+-- BUILD PAGE 1: AUTO CATALOG
 -------------------------------------------------------------------------
 do
     local page = UI.AutoPage
@@ -712,7 +725,7 @@ do
     end)
 
     -- 2. AUTOCREATE PILLS
-    addSectionHeader("Auto Create Pills (Anywhere + Instant Claim)", 180)
+    addSectionHeader("Auto Create Pills (Smooth + Instant Claim)", 180)
 
     local pillDropContainer = Instance.new("Frame")
     pillDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
@@ -785,15 +798,29 @@ do
     -- 3. CULTIVATION (AUTO REALM M & AUTO BODY P) & BREAKTHROUGH
     addSectionHeader("Cultivation (Auto Realm & Auto Body) & Breakthrough", 298)
 
-    createToggleRow(page, 323, "Auto Realm (Meditate - Key M)", State.autoRealmActive, nil, function(val)
+    local setRealmSwitch, setBodySwitch
+
+    _, setRealmSwitch = createToggleRow(page, 323, "Auto Realm (Meditate - Key M)", State.autoRealmActive, nil, function(val)
         State.autoRealmActive = val
         Config.autoRealmActive = val
+        State.lastRealmKeyPress = 0
+        if val and State.autoBodyActive then
+            State.autoBodyActive = false
+            Config.autoBodyActive = false
+            if setBodySwitch then setBodySwitch(false) end
+        end
         saveConfig()
     end)
 
-    createToggleRow(page, 368, "Auto Body (Train Body - Key P)", State.autoBodyActive, nil, function(val)
+    _, setBodySwitch = createToggleRow(page, 368, "Auto Body (Train Body - Key P)", State.autoBodyActive, nil, function(val)
         State.autoBodyActive = val
         Config.autoBodyActive = val
+        State.lastBodyKeyPress = 0
+        if val and State.autoRealmActive then
+            State.autoRealmActive = false
+            Config.autoRealmActive = false
+            if setRealmSwitch then setRealmSwitch(false) end
+        end
         saveConfig()
     end)
 
@@ -934,9 +961,9 @@ do
 end
 
 -------------------------------------------------------------------------
--- BUILD PAGE 2: LOCATION CATALOG (QI ZONE & BODY ZONE + SOLAR HUB BOX)
+-- BUILD PAGE 2: LOCATION CATALOG (INSTANT TELEPORT ALL MAP ZONES)
 -------------------------------------------------------------------------
-local teleportToZoneBuffRange
+local instantTeleportToZone
 
 do
     local locPage = UI.LocationPage
@@ -1063,8 +1090,8 @@ do
         Config.selectedQiZone = zName
         saveConfig()
     end, function()
-        if teleportToZoneBuffRange then
-            task.spawn(function() teleportToZoneBuffRange(State.selectedQiZone) end)
+        if instantTeleportToZone then
+            task.spawn(function() instantTeleportToZone(State.selectedQiZone) end)
         end
     end)
 
@@ -1073,16 +1100,17 @@ do
         Config.selectedBodyZone = zName
         saveConfig()
     end, function()
-        if teleportToZoneBuffRange then
-            task.spawn(function() teleportToZoneBuffRange(State.selectedBodyZone) end)
+        if instantTeleportToZone then
+            task.spawn(function() instantTeleportToZone(State.selectedBodyZone) end)
         end
     end)
 
     local zoneStatusLabel = Instance.new("TextLabel")
-    zoneStatusLabel.Size = UDim2.new(0.96, 0, 0, 26)
+    zoneStatusLabel.Size = UDim2.new(0.96, 0, 0, 32)
     zoneStatusLabel.Position = UDim2.new(0, 4, 0, 265)
     zoneStatusLabel.BackgroundTransparency = 1
-    zoneStatusLabel.Text = "Status Location: Pilih Qi/Body Zone lalu tekan tombol Teleport."
+    zoneStatusLabel.TextWrapped = true
+    zoneStatusLabel.Text = "Status Location: Pilih Qi/Body Zone lalu klik tombol Teleport (Instant Teleport)."
     zoneStatusLabel.TextColor3 = Color3.fromRGB(180, 210, 160)
     zoneStatusLabel.TextSize = 11
     zoneStatusLabel.Font = Enum.Font.GothamMedium
@@ -1092,7 +1120,7 @@ do
 end
 
 -------------------------------------------------------------------------
--- BUILD PAGE 3: SETTING CATALOG (SCOPED BLOCK)
+-- BUILD PAGE 3: SETTING CATALOG
 -------------------------------------------------------------------------
 do
     local setPage = UI.SettingPage
@@ -1180,7 +1208,7 @@ do
     infoBox.Position = UDim2.new(0, 0, 0, 118)
     infoBox.BackgroundTransparency = 1
     infoBox.TextWrapped = true
-    infoBox.Text = "• Optimasi Register Lokal: Di bawah 35 variabel lokal (Bebas Error Limit 200 di Madium & Loadstring).\n• Auto-Save Config: Tersimpan di '" .. CONFIG_FILE_NAME .. "'.\n• Auto Realm (Key M) & Auto Body (Key P) terpisah.\n• Katalog Location: Teleport presisi ke titik tengah buff Qi Zone & Body Zone."
+    infoBox.Text = "• Auto Create Pills: State-Based Smooth (Bebas spam & mendeteksi 1000-Year s/d 1-Year).\n• Auto Realm (M) & Auto Body (P): Mendeteksi +Qi/+Exp & Aura agar tidak berhenti-berhenti.\n• Instant Teleport: Mendukung lokasi jauh (Bypass StreamingEnabled) langsung ke titik buff."
     infoBox.TextColor3 = Color3.fromRGB(160, 160, 160)
     infoBox.TextSize = 11
     infoBox.Font = Enum.Font.Gotham
@@ -1190,97 +1218,210 @@ do
 end
 
 -------------------------------------------------------------------------
--- SMART ZONE DETECTOR & PRECISION BUFF TELEPORT
+-- INSTANT TELEPORT & FAR-ZONE RESOLVER (BYPASS STREAMINGENABLED)
 -------------------------------------------------------------------------
 do
-    local function getZoneBuffCenterPosition(zoneName)
-        local targetLower = zoneName:lower()
-        local matchedObjects = {}
-
-        for _, obj in pairs(Workspace:GetDescendants()) do
-            local isMatch = false
-            if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Folder") then
-                if obj.Name:lower():find(targetLower, 1, true) then
-                    isMatch = true
-                end
-            elseif (obj:IsA("TextLabel") or obj:IsA("TextBox")) and obj.Text:lower():find(targetLower, 1, true) then
-                local ancestor = obj:FindFirstAncestorOfClass("Model") or obj:FindFirstAncestorWhichIsA("BasePart")
-                if ancestor then table.insert(matchedObjects, ancestor) end
-            elseif obj:IsA("StringValue") and obj.Value:lower():find(targetLower, 1, true) then
-                if obj.Parent then table.insert(matchedObjects, obj.Parent) end
+    -- Mengambil posisi 3D dari objek apa pun bahkan jika BasePart di dalamnya belum ter-stream
+    local function extractWorldPosition(obj)
+        if not obj then return nil end
+        if obj:IsA("BasePart") then
+            return obj.Position
+        elseif obj:IsA("Model") then
+            local ok, cf = pcall(function() return obj:GetPivot() end)
+            if ok and cf and cf.Position.Magnitude > 1 then
+                return cf.Position
             end
-
-            if not isMatch and (obj:IsA("Model") or obj:IsA("BasePart")) then
-                pcall(function()
-                    for _, attrVal in pairs(obj:GetAttributes()) do
-                        if tostring(attrVal):lower():find(targetLower, 1, true) then
-                            isMatch = true
-                            break
-                        end
-                    end
-                end)
+            local ok2, bboxCf = pcall(function()
+                local c, _ = obj:GetBoundingBox()
+                return c
+            end)
+            if ok2 and bboxCf and bboxCf.Position.Magnitude > 1 then
+                return bboxCf.Position
             end
-
-            if isMatch then table.insert(matchedObjects, obj) end
+        elseif obj:IsA("Attachment") then
+            return obj.WorldPosition
+        elseif obj:IsA("CFrameValue") then
+            return obj.Value.Position
+        elseif obj:IsA("Vector3Value") then
+            return obj.Value
         end
 
-        if #matchedObjects == 0 then return nil end
+        for _, child in pairs(obj:GetDescendants()) do
+            if child:IsA("BasePart") then
+                return child.Position
+            elseif child:IsA("Model") then
+                local ok, cf = pcall(function() return child:GetPivot() end)
+                if ok and cf and cf.Position.Magnitude > 1 then
+                    return cf.Position
+                end
+            elseif child:IsA("CFrameValue") and child.Value.Position.Magnitude > 1 then
+                return child.Value.Position
+            elseif child:IsA("Vector3Value") and child.Value.Magnitude > 1 then
+                return child.Value
+            end
+        end
+        return nil
+    end
 
+    -- Mencari titik lantai/pusat buff zona yang sudah ter-stream di dekat koordinat
+    local function refineZoneBuffFloorPosition(rawPos, zoneName)
+        local normTarget = normalizeName(zoneName)
         local bestPart = nil
         local bestPriority = -1
         local largestArea = 0
 
-        for _, matchObj in ipairs(matchedObjects) do
-            local partsList = {}
-            if matchObj:IsA("BasePart") then
-                table.insert(partsList, matchObj)
-            else
-                for _, d in pairs(matchObj:GetDescendants()) do
-                    if d:IsA("BasePart") then table.insert(partsList, d) end
-                end
-            end
+        for _, obj in pairs(Workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and (obj.Position - rawPos).Magnitude < 180 then
+                local pName = obj.Name:lower()
+                local parentName = obj.Parent and normalizeName(obj.Parent.Name) or ""
+                local isZonePart = parentName:find(normTarget, 1, true) or normalizeName(obj.Name):find(normTarget, 1, true)
 
-            for _, p in ipairs(partsList) do
-                local pName = p.Name:lower()
-                local priority = 1
-                if pName:find("zone") or pName:find("buff") or pName:find("area") or pName:find("hitbox") or pName:find("center") or pName:find("floor") or pName:find("pad") or pName:find("circle") then
-                    priority = 3
-                elseif not pName:find("sign") and not pName:find("banner") and not pName:find("wall") and not pName:find("roof") and not pName:find("pillar") then
+                local priority = 0
+                if pName:find("zone") or pName:find("buff") or pName:find("area") or pName:find("hitbox") or pName:find("center") or pName:find("floor") or pName:find("pad") or pName:find("circle") or pName:find("mat") then
+                    priority = isZonePart and 4 or 3
+                elseif isZonePart and not pName:find("sign") and not pName:find("banner") and not pName:find("wall") and not pName:find("roof") and not pName:find("pillar") then
                     priority = 2
                 end
 
-                local footprint = p.Size.X * p.Size.Z
-                if priority > bestPriority or (priority == bestPriority and footprint > largestArea) then
-                    bestPriority = priority
-                    largestArea = footprint
-                    bestPart = p
+                if priority > 0 then
+                    local footprint = obj.Size.X * obj.Size.Z
+                    if priority > bestPriority or (priority == bestPriority and footprint > largestArea) then
+                        bestPriority = priority
+                        largestArea = footprint
+                        bestPart = obj
+                    end
                 end
             end
         end
 
-        local rawCenterPos = nil
-        if bestPart then
-            rawCenterPos = bestPart.Position
-        elseif matchedObjects[1]:IsA("Model") then
-            local cf, _ = matchedObjects[1]:GetBoundingBox()
-            rawCenterPos = cf.Position
-        end
-
-        if not rawCenterPos then return nil end
+        local centerPos = bestPart and bestPart.Position or rawPos
 
         local rayParams = RaycastParams.new()
         rayParams.FilterType = Enum.RaycastFilterType.Exclude
         rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
 
-        local rayResult = Workspace:Raycast(Vector3.new(rawCenterPos.X, rawCenterPos.Y + 45, rawCenterPos.Z), Vector3.new(0, -150, 0), rayParams)
+        local rayResult = Workspace:Raycast(Vector3.new(centerPos.X, centerPos.Y + 60, centerPos.Z), Vector3.new(0, -200, 0), rayParams)
         if rayResult then
             return rayResult.Position + Vector3.new(0, 3.2, 0)
-        else
-            return rawCenterPos + Vector3.new(0, 3.2, 0)
         end
+        return centerPos + Vector3.new(0, 3.2, 0)
     end
 
-    teleportToZoneBuffRange = function(zoneName)
+    -- Mencari koordinat zona di Workspace, ReplicatedStorage, dan Cache
+    local function findZoneCoordinatesAnywhere(zoneName)
+        local normTarget = normalizeName(zoneName)
+
+        -- 1. Pindai Workspace & ReplicatedStorage (termasuk Model yang belum ter-stream BasePart-nya)
+        for _, container in ipairs({Workspace, ReplicatedStorage}) do
+            for _, obj in pairs(container:GetDescendants()) do
+                local matched = false
+                local objNorm = normalizeName(obj.Name)
+
+                if objNorm ~= "" and (objNorm:find(normTarget, 1, true) or normTarget:find(objNorm, 1, true)) and #objNorm >= 6 then
+                    matched = true
+                elseif (obj:IsA("TextLabel") or obj:IsA("TextBox")) and normalizeName(obj.Text):find(normTarget, 1, true) then
+                    local anc = obj:FindFirstAncestorOfClass("Model") or obj:FindFirstAncestorWhichIsA("BasePart") or obj.Parent
+                    local pos = extractWorldPosition(anc)
+                    if pos then
+                        State.zoneCache[zoneName] = pos
+                        return pos
+                    end
+                elseif obj:IsA("StringValue") and normalizeName(obj.Value):find(normTarget, 1, true) then
+                    local pos = extractWorldPosition(obj.Parent)
+                    if pos then
+                        State.zoneCache[zoneName] = pos
+                        return pos
+                    end
+                end
+
+                if not matched and (obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Folder") or obj:IsA("Configuration")) then
+                    pcall(function()
+                        for _, attrVal in pairs(obj:GetAttributes()) do
+                            if normalizeName(tostring(attrVal)):find(normTarget, 1, true) then
+                                matched = true
+                                break
+                            end
+                        end
+                    end)
+                end
+
+                if matched then
+                    local pos = extractWorldPosition(obj)
+                    if pos then
+                        State.zoneCache[zoneName] = pos
+                        return pos
+                    end
+                end
+            end
+        end
+
+        if State.zoneCache[zoneName] then
+            return State.zoneCache[zoneName]
+        end
+
+        return nil
+    end
+
+    -- Jika zona sangat jauh dan belum dimuat oleh StreamingEnabled, pindai titik-titik map secara kilat
+    local function streamScanMapForZone(zoneName)
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local originCFrame = root and root.CFrame
+
+        -- Kumpulkan kandidat Model besar / pulau / penanda area di Workspace yang memiliki WorldPivot jauh
+        local probePoints = {}
+        for _, obj in pairs(Workspace:GetDescendants()) do
+            if obj:IsA("Model") then
+                local ok, cf = pcall(function() return obj:GetPivot() end)
+                if ok and cf and cf.Position.Magnitude > 10 then
+                    local tooClose = false
+                    for _, pt in ipairs(probePoints) do
+                        if (pt - cf.Position).Magnitude < 450 then
+                            tooClose = true
+                            break
+                        end
+                    end
+                    if not tooClose then
+                        table.insert(probePoints, cf.Position)
+                    end
+                end
+            end
+        end
+
+        -- Tambahkan grid pencarian luas jika model belum tampak
+        local gridOffsets = {
+            Vector3.new(1500, 200, 0), Vector3.new(-1500, 200, 0),
+            Vector3.new(0, 200, 1500), Vector3.new(0, 200, -1500),
+            Vector3.new(1500, 300, 1500), Vector3.new(-1500, 300, 1500),
+            Vector3.new(1500, 300, -1500), Vector3.new(-1500, 300, -1500),
+            Vector3.new(3000, 400, 0), Vector3.new(-3000, 400, 0),
+            Vector3.new(0, 400, 3000), Vector3.new(0, 400, -3000)
+        }
+        for _, off in ipairs(gridOffsets) do
+            table.insert(probePoints, off)
+        end
+
+        for _, pt in ipairs(probePoints) do
+            pcall(function()
+                LocalPlayer:RequestStreamAroundAsync(pt, 1.5)
+            end)
+            if root then
+                root.CFrame = CFrame.new(pt)
+            end
+            task.wait(0.08)
+            local found = findZoneCoordinatesAnywhere(zoneName)
+            if found then
+                return found
+            end
+        end
+
+        if root and originCFrame then
+            root.CFrame = originCFrame
+        end
+        return nil
+    end
+
+    instantTeleportToZone = function(zoneName)
         if State.isTeleportingZone then return end
         State.isTeleportingZone = true
 
@@ -1293,107 +1434,177 @@ do
             return
         end
 
-        UI.ZoneStatusLabel.Text = "Mencari koordinat buff zone: " .. zoneName .. "..."
-        local targetPos = getZoneBuffCenterPosition(zoneName)
+        UI.ZoneStatusLabel.Text = "Mencari koordinat " .. zoneName .. "..."
+        local targetPos = findZoneCoordinatesAnywhere(zoneName)
+
+        -- Jika belum ter-stream karena jarak terlalu jauh, muat stream area map
+        if not targetPos then
+            UI.ZoneStatusLabel.Text = "Memuat area jauh (Streaming Map) untuk " .. zoneName .. "..."
+            targetPos = streamScanMapForZone(zoneName)
+        end
 
         if not targetPos then
-            UI.ZoneStatusLabel.Text = "Zona '" .. zoneName .. "' belum ditemukan di sekitar."
+            UI.ZoneStatusLabel.Text = "Gagal menemukan '" .. zoneName .. "' di Map."
             State.isTeleportingZone = false
             return
         end
 
-        local dist = (root.Position - targetPos).Magnitude
-        UI.ZoneStatusLabel.Text = string.format("Berpindah ke %s (%d studs)...", zoneName, math.round(dist))
+        UI.ZoneStatusLabel.Text = "Instant Teleport ke " .. zoneName .. "..."
 
-        local duration = math.clamp(dist / math.max(State.flySpeed, 120), 0.15, 4.5)
-        local bodyVel = Instance.new("BodyVelocity")
-        bodyVel.Velocity = Vector3.new(0, 0, 0)
-        bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-        bodyVel.Parent = root
+        -- 1. Minta server men-stream area tujuan
+        pcall(function()
+            LocalPlayer:RequestStreamAroundAsync(targetPos, 3)
+        end)
 
-        local tween = TweenService:Create(
-            root,
-            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-            {CFrame = CFrame.new(targetPos)}
-        )
-        tween:Play()
-        tween.Completed:Wait()
-
-        root.CFrame = CFrame.new(targetPos)
+        -- 2. INSTANT TELEPORT (Tanpa Terbang / Tanpa TweenService)
         root.Velocity = Vector3.new(0, 0, 0)
-        bodyVel:Destroy()
+        char:PivotTo(CFrame.new(targetPos + Vector3.new(0, 5, 0)))
+        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 5, 0))
 
-        UI.ZoneStatusLabel.Text = "Berada di dalam jangkauan buff: " .. zoneName .. "!"
+        -- 3. Tunggu sebentar agar lantai zona ter-render, lalu kunci tepat di tengah lantai Buff Zone
+        task.wait(0.25)
+        local preciseBuffPos = refineZoneBuffFloorPosition(targetPos, zoneName)
+        State.zoneCache[zoneName] = preciseBuffPos
+
+        root.Velocity = Vector3.new(0, 0, 0)
+        char:PivotTo(CFrame.new(preciseBuffPos))
+        root.CFrame = CFrame.new(preciseBuffPos)
+
+        -- Reset timer kultivasi agar Auto Realm / Auto Body langsung lanjut di tempat baru
+        State.lastQiGainTick = 0
+        State.lastBodyGainTick = 0
+
+        UI.ZoneStatusLabel.Text = "Berhasil Instant Teleport ke buff zone: " .. zoneName .. "!"
         State.isTeleportingZone = false
     end
 end
 
 -------------------------------------------------------------------------
--- AUTO REALM (KEY M) & AUTO BODY (KEY P)
+-- AUTO REALM (KEY M) & AUTO BODY (KEY P) - ANTI-STOP ACTIVITY TRACKER
 -------------------------------------------------------------------------
-task.spawn(function()
-    local function isCurrentlyCultivating(modeType)
-        local char = LocalPlayer.Character
-        if not char then return false end
-
-        local attrCheck = false
-        pcall(function()
-            for k, v in pairs(char:GetAttributes()) do
-                local kLow = tostring(k):lower()
-                if modeType == "Realm" and (kLow:find("meditat") or kLow:find("cultivat")) and v == true then
-                    attrCheck = true
-                elseif modeType == "Body" and (kLow:find("train") or kLow:find("body") or kLow:find("exercis")) and v == true then
-                    attrCheck = true
-                end
-            end
-        end)
-        if attrCheck then return true end
-
-        local hum = char:FindFirstChildWhichIsA("Humanoid")
-        local animator = hum and hum:FindFirstChildWhichIsA("Animator")
-        if animator then
-            for _, track in pairs(animator:GetPlayingAnimationTracks()) do
-                local animName = (track.Name or ""):lower()
-                if modeType == "Realm" and (animName:find("meditat") or animName:find("sit") or animName:find("cultivat") or animName:find("lotus")) then
-                    return true
-                elseif modeType == "Body" and (animName:find("train") or animName:find("body") or animName:find("punch") or animName:find("push") or animName:find("squat") or animName:find("exercis")) then
-                    return true
+do
+    -- Memantau setiap popup kenaikan "+... Qi" dan "+... Exp" secara real-time
+    local function checkGainText(obj)
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            local txt = obj.Text or ""
+            if txt:find("%+") then
+                local low = txt:lower()
+                if low:find("qi") then
+                    State.lastQiGainTick = tick()
+                elseif low:find("exp") or low:find("body") then
+                    State.lastBodyGainTick = tick()
                 end
             end
         end
+    end
+
+    task.spawn(function()
+        local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+        playerGui.DescendantAdded:Connect(function(desc)
+            task.defer(function()
+                pcall(checkGainText, desc)
+            end)
+        end)
+    end)
+
+    -- Mengecek apakah karakter sedang aktif kultivasi (berdasarkan Popup Gain, Perubahan Bar, atau Aura Partikel)
+    local function isCultivationActiveNow(modeType)
+        local now = tick()
+
+        -- 1. Jika dalam 4.2 detik terakhir muncul popup "+... Qi" (untuk Realm) atau "+... Exp" (untuk Body), berarti 100% sedang aktif!
+        if modeType == "Realm" and (now - State.lastQiGainTick) < 4.2 then
+            return true
+        elseif modeType == "Body" and (now - State.lastBodyGainTick) < 4.2 then
+            return true
+        end
+
+        -- 2. Pindai teks popup "+Qi" / "+Exp" yang masih terlihat di layar saat ini
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if playerGui then
+            for _, obj in pairs(playerGui:GetDescendants()) do
+                if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                    local raw = obj.Text or ""
+                    if raw:find("^%s*%+[%d%.%,kKmMbB]+%s+Qi") then
+                        State.lastQiGainTick = now
+                        if modeType == "Realm" then return true end
+                    elseif raw:find("^%s*%+[%d%.%,kKmMbB]+%s+Exp") then
+                        State.lastBodyGainTick = now
+                        if modeType == "Body" then return true end
+                    end
+                end
+            end
+        end
+
+        -- 3. Cek apakah ada ParticleEmitter / Beam aura kultivasi yang menyala pada karakter
+        local char = LocalPlayer.Character
+        if char then
+            for _, desc in pairs(char:GetDescendants()) do
+                if (desc:IsA("ParticleEmitter") or desc:IsA("Beam")) and desc.Enabled then
+                    local n = (desc.Name .. " " .. (desc.Parent and desc.Parent.Name or "")):lower()
+                    if modeType == "Realm" and (n:find("qi") or n:find("meditat") or n:find("aura") or n:find("cultivat") or n:find("purple")) then
+                        return true
+                    elseif modeType == "Body" and (n:find("body") or n:find("train") or n:find("aura") or n:find("orange") or n:find(" sweat")) then
+                        return true
+                    end
+                end
+            end
+        end
+
         return false
     end
 
-    while true do
-        if not isUserTypingOrInMenu() and not State.isTeleportingZone then
-            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-            local inTrial = false
-            if playerGui then
-                for _, obj in pairs(playerGui:GetDescendants()) do
-                    if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
-                        local t = trimText(obj.Text)
-                        if t:find("breakthrough trial", 1, true) or t:find("ring turns gold", 1, true) then
-                            inTrial = true
-                            break
+    task.spawn(function()
+        while true do
+            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+                local isMoving = hum and (hum.MoveDirection.Magnitude > 0.05)
+
+                if isMoving then
+                    -- Jika pemain sengaja berjalan manual, reset timer agar setelah berhenti berjalan otomatis lanjut kultivasi
+                    State.lastQiGainTick = 0
+                    State.lastBodyGainTick = 0
+                else
+                    -- Pastikan tidak sedang di dalam minigame Breakthrough Trial
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local inTrial = false
+                    if playerGui then
+                        for _, obj in pairs(playerGui:GetDescendants()) do
+                            if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                                local t = trimText(obj.Text)
+                                if t:find("breakthrough trial", 1, true) or t:find("ring turns gold", 1, true) then
+                                    inTrial = true
+                                    break
+                                end
+                            end
+                        end
+                    end
+
+                    if not inTrial then
+                        local now = tick()
+
+                        -- AUTO REALM (KEY M): Hanya tekan M jika kultivasi Qi benar-benar sedang berhenti & sudah lewat masa tunggu 4.5 detik
+                        if State.autoRealmActive then
+                            if not isCultivationActiveNow("Realm") and (now - State.lastRealmKeyPress > 4.5) then
+                                State.lastRealmKeyPress = now
+                                triggerKeyPress("M")
+                            end
+                        end
+
+                        -- AUTO BODY (KEY P): Hanya tekan P jika latihan Body benar-benar sedang berhenti & sudah lewat masa tunggu 4.5 detik
+                        if State.autoBodyActive then
+                            if not isCultivationActiveNow("Body") and (now - State.lastBodyKeyPress > 4.5) then
+                                State.lastBodyKeyPress = now
+                                triggerKeyPress("P")
+                            end
                         end
                     end
                 end
             end
-
-            if not inTrial then
-                if State.autoRealmActive and not isCurrentlyCultivating("Realm") then
-                    triggerKeyPress("M")
-                    task.wait(1.8)
-                end
-                if State.autoBodyActive and not isCurrentlyCultivating("Body") then
-                    triggerKeyPress("P")
-                    task.wait(1.8)
-                end
-            end
+            task.wait(0.6)
         end
-        task.wait(1.2)
-    end
-end)
+    end)
+end
 
 -------------------------------------------------------------------------
 -- 1. FARMING LOGIC (HERBS - PRIORITY 1000YR > 100YR > 10YR > 1YR)
@@ -1532,16 +1743,19 @@ task.spawn(function()
 end)
 
 -------------------------------------------------------------------------
--- 2. AUTOCREATE PILLS (ANYWHERE + BACKGROUND UI + INSTANT CLAIM)
+-- 2. AUTOCREATE PILLS (STATE-BASED SMOOTH, NO SPAM & INSTANT CLAIM)
 -------------------------------------------------------------------------
 task.spawn(function()
-    local function findElementByText(exactOrPartialText, exactMatch, allowHidden)
+    local lastCauldronPromptTime = 0
+
+    local function findVisibleTextElement(targetStr, exactMatch)
         local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
         if not playerGui then return nil end
-        local targetLower = trimText(exactOrPartialText)
+        local targetLower = trimText(targetStr)
+
         for _, obj in pairs(playerGui:GetDescendants()) do
             if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) then
-                if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and (allowHidden or isActuallyVisible(obj)) then
+                if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
                     local textLower = trimText(obj.Text)
                     if (exactMatch and textLower == targetLower) or (not exactMatch and textLower:find(targetLower, 1, true)) then
                         return obj
@@ -1552,113 +1766,163 @@ task.spawn(function()
         return nil
     end
 
-    local function ensureCauldronSessionActive()
-        local brewObj = findElementByText("brew", true, true)
-        local stokeObj = findElementByText("stoke", true, true)
-        local claimObj = findElementByText("claim", true, true)
+    -- Membuka Cauldron secara halus tanpa merusak sub-frame modal "Choose a herb"
+    local function openCauldronIfClosed()
+        local isOpen = findVisibleTextElement("alchemy cauldron", false)
+            or findVisibleTextElement("choose a herb", false)
+            or findVisibleTextElement("stoke", true)
 
-        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-        if playerGui then
-            for _, desc in pairs(playerGui:GetDescendants()) do
-                if not desc:IsDescendantOf(UI.ScreenGui) then
-                    local n = desc.Name:lower()
-                    if n:find("cauldron") or n:find("alchemy") then
-                        if desc:IsA("ScreenGui") and not desc.Enabled then desc.Enabled = true
-                        elseif desc:IsA("GuiObject") and not desc.Visible then desc.Visible = true end
-                    end
-                end
-            end
-        end
+        if isOpen then return true end
 
-        if brewObj or stokeObj or claimObj then return true end
+        if tick() - lastCauldronPromptTime < 2.0 then return false end
+        lastCauldronPromptTime = tick()
 
         for _, obj in pairs(Workspace:GetDescendants()) do
             if obj:IsA("ProximityPrompt") then
                 local objText = (obj.ObjectText .. " " .. obj.ActionText .. " " .. obj.Parent.Name):lower()
                 if objText:find("cauldron") or objText:find("brew") or objText:find("alchemy") then
-                    pcall(function() if fireproximityprompt then fireproximityprompt(obj) end end)
-                    return true
+                    pcall(function()
+                        if fireproximityprompt then fireproximityprompt(obj) end
+                    end)
+                    return false
                 end
             end
         end
         return false
     end
 
-    local function attemptInstantClaimPill()
-        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-        if playerGui then
-            for _, obj in pairs(playerGui:GetDescendants()) do
-                if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
-                    local t = trimText(obj.Text)
-                    if t == "claim" or t == "collect" or t:find("skip") or t:find("instant") then
+    -- Instant Claim khusus tombol Claim di dalam jendela Cauldron (tidak menyentuh Daily/Quest Claim)
+    local function claimFinishedPillInCauldron()
+        local cauldronHeader = findVisibleTextElement("alchemy cauldron", false)
+            or findVisibleTextElement("brew", true)
+            or findVisibleTextElement("stoke", true)
+
+        local rootContainer = cauldronHeader and cauldronHeader:FindFirstAncestorOfClass("ScreenGui") or LocalPlayer:FindFirstChild("PlayerGui")
+        if not rootContainer then return false end
+
+        local claimed = false
+        for _, obj in pairs(rootContainer:GetDescendants()) do
+            if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
+                local t = trimText(obj.Text)
+                if t == "claim" or t == "collect" or t == "claim pill" then
+                    -- Pastikan bukan tombol Daily Reward ("already claimed today")
+                    local pName = (obj.Parent and obj.Parent.Name or ""):lower()
+                    if not pName:find("daily") and not pName:find("quest") and not pName:find("reward") then
                         triggerGuiClick(obj, true, false)
+                        claimed = true
                     end
                 end
             end
         end
+
+        -- Tembakkan RemoteEvent selesai masak pil jika tersedia di ReplicatedStorage.CultivationEvents
         pcall(function()
-            for _, rem in pairs(ReplicatedStorage:GetDescendants()) do
+            local cultEvents = ReplicatedStorage:FindFirstChild("CultivationEvents") or ReplicatedStorage
+            for _, rem in pairs(cultEvents:GetDescendants()) do
                 if rem:IsA("RemoteEvent") then
                     local rn = rem.Name:lower()
-                    if rn:find("claim") or (rn:find("cauldron") and not rn:find("open")) or rn:find("collectpill") or rn:find("finishbrew") then
+                    if rn:find("claimpill") or rn:find("collectpill") or rn:find("finishbrew") or rn == "claimcauldron" then
                         rem:FireServer()
-                        rem:FireServer("Claim")
                     end
                 end
             end
         end)
+
+        return claimed
     end
 
-    local function selectBestHerbFromModal(herbName)
-        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-        if not playerGui then return false end
+    -- Memilih Herb dari jendela "Choose a herb" (Mendukung format "1000-Year", "100-Year", multi-line text, & auto-scroll)
+    local function chooseBestHerbFromList(herbName)
+        local modalHeader = findVisibleTextElement("choose a herb", false)
+        if not modalHeader then return false end
+
+        local modalWindow = modalHeader.Parent
+        while modalWindow and modalWindow ~= LocalPlayer.PlayerGui and modalWindow.AbsoluteSize.Y < 220 do
+            modalWindow = modalWindow.Parent
+        end
+        if not modalWindow then modalWindow = LocalPlayer.PlayerGui end
+
         local herbLower = trimText(herbName)
         local candidates = {}
 
-        for _, obj in pairs(playerGui:GetDescendants()) do
-            if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
-                if trimText(obj.Text) == herbLower then
-                    local row = obj.Parent
-                    for _ = 1, 3 do
-                        if row then
-                            local chooseBtn = nil
-                            local yearScore = 0
-                            local quantity = 1
-                            for _, child in pairs(row:GetDescendants()) do
-                                if child:IsA("TextLabel") or child:IsA("TextButton") then
-                                    local txt = trimText(child.Text)
-                                    if txt == "choose" then
-                                        chooseBtn = child
-                                    elseif txt:find("year") then
-                                        for _, yrData in ipairs(Constants.HERB_YEAR_PRIORITY) do
-                                            if txt:find(yrData.pattern, 1, true) then
-                                                yearScore = math.max(yearScore, yrData.score)
-                                                break
-                                            end
-                                        end
-                                    elseif txt:match("^x%d+") then
-                                        local num = tonumber(txt:match("%d+"))
-                                        if num then quantity = num end
-                                    end
-                                end
-                            end
-                            if chooseBtn and quantity > 0 then
-                                table.insert(candidates, {ChooseButton = chooseBtn, Score = yearScore})
-                                break
-                            end
-                            row = row.Parent
+        -- Cari semua tombol "Choose" di dalam jendela "Choose a herb"
+        for _, obj in pairs(modalWindow:GetDescendants()) do
+            if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and trimText(obj.Text) == "choose" then
+                local chooseBtn = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj.Parent
+                local row = chooseBtn and chooseBtn.Parent
+                if row and row.AbsoluteSize.X < 150 and row.Parent then
+                    row = row.Parent
+                end
+
+                if row then
+                    local rowTexts = {}
+                    for _, ch in pairs(row:GetDescendants()) do
+                        if ch:IsA("TextLabel") or ch:IsA("TextButton") then
+                            table.insert(rowTexts, ch.Text or "")
+                        end
+                    end
+                    local combinedRowText = table.concat(rowTexts, " "):lower()
+
+                    -- Cek apakah baris ini adalah tanaman yang dicari (misal "ginseng")
+                    if combinedRowText:find(herbLower, 1, true) then
+                        local yearScore = 1
+                        if combinedRowText:find("1000", 1, true) then
+                            yearScore = 4
+                        elseif combinedRowText:find("100", 1, true) then
+                            yearScore = 3
+                        elseif combinedRowText:find("10", 1, true) then
+                            yearScore = 2
+                        end
+
+                        local qty = 1
+                        local qtyMatch = combinedRowText:match("x(%d+)")
+                        if qtyMatch then
+                            qty = tonumber(qtyMatch) or 1
+                        end
+
+                        if qty > 0 then
+                            table.insert(candidates, {
+                                Row = row,
+                                ChooseBtn = chooseBtn,
+                                Score = yearScore
+                            })
                         end
                     end
                 end
             end
         end
 
-        if #candidates == 0 then return false end
-        table.sort(candidates, function(a, b) return a.Score > b.Score end)
-        triggerGuiClick(candidates[1].ChooseButton, false, false)
+        if #candidates == 0 then
+            return false
+        end
+
+        -- Urutkan dari 1000-Year (4) -> 100-Year (3) -> 10-Year (2) -> 1-Year (1)
+        table.sort(candidates, function(a, b)
+            return a.Score > b.Score
+        end)
+
+        local best = candidates[1]
+        local scrollFrame = best.Row:FindFirstAncestorWhichIsA("ScrollingFrame")
+        if scrollFrame then
+            local sfY = scrollFrame.AbsolutePosition.Y
+            local sfH = scrollFrame.AbsoluteSize.Y
+            local rY = best.Row.AbsolutePosition.Y
+            local rH = best.Row.AbsoluteSize.Y
+
+            if rY < sfY or (rY + rH) > (sfY + sfH) then
+                scrollFrame.CanvasPosition = Vector2.new(
+                    scrollFrame.CanvasPosition.X,
+                    math.max(0, scrollFrame.CanvasPosition.Y + (rY - sfY) - (sfH * 0.35))
+                )
+                task.wait(0.18)
+            end
+        end
+
+        triggerGuiClick(best.ChooseBtn, false, true)
         return true
     end
 
+    -- Menyelesaikan minigame "Stoke the Fire" secara akurat lalu langsung Instant Claim
     local function handleStokeMinigame(stokeBtnObj)
         local modalContainer = stokeBtnObj.Parent
         while modalContainer and modalContainer ~= LocalPlayer.PlayerGui and modalContainer.AbsoluteSize.Y < 130 do
@@ -1737,77 +2001,84 @@ task.spawn(function()
                 end
 
                 if zMin and zMax and ((predictedX >= zMin and predictedX <= zMax) or (curCenter >= zMin and curCenter <= zMax)) then
-                    triggerGuiClick(stokeBtnObj, true, false)
+                    triggerGuiClick(stokeBtnObj, true, true)
                     break
                 end
             end
             RunService.RenderStepped:Wait()
         end
 
-        task.spawn(function()
-            for _ = 1, 6 do
-                if not State.autoPillActive then break end
-                attemptInstantClaimPill()
-                task.wait(0.15)
+        -- Begitu minigame Stoke selesai, langsung eksekusi Instant Claim tanpa spam saat idle
+        task.wait(0.2)
+        for _ = 1, 8 do
+            if not State.autoPillActive then break end
+            if claimFinishedPillInCauldron() then
+                task.wait(0.25)
             end
-        end)
+            if findVisibleTextElement("add herb", true) or findVisibleTextElement("brew", true) then
+                break
+            end
+            task.wait(0.2)
+        end
     end
+
+    local nextSlotToFill = 1
 
     while true do
         if State.autoPillActive and not isUserTypingOrInMenu() then
-            ensureCauldronSessionActive()
-            local claimObj = findElementByText("claim", true, false)
-            if claimObj then
-                triggerGuiClick(claimObj, true, false)
-                task.wait(0.25)
+            openCauldronIfClosed()
+
+            -- STATE 1: Jika tombol Claim pil yang sudah matang terlihat di layar, klik langsung
+            local visibleClaim = findVisibleTextElement("claim", true)
+            if visibleClaim then
+                triggerGuiClick(visibleClaim, false, true)
+                task.wait(0.45)
+
+            -- STATE 2: Jika minigame Stoke sedang muncul di layar
             else
-                local stokeObj = findElementByText("stoke", true, false)
+                local stokeObj = findVisibleTextElement("stoke", true)
                 if stokeObj then
                     handleStokeMinigame(stokeObj)
-                    attemptInstantClaimPill()
-                    task.wait(0.2)
-                else
-                    attemptInstantClaimPill()
-                    local addHerbObj = findElementByText("add herb", true, true)
-                    local brewObj = findElementByText("brew", true, true)
-                    if brewObj then
-                        local backObj = findElementByText("back", true, false)
-                        if backObj then
-                            triggerGuiClick(backObj, false, false)
-                            task.wait(0.25)
+                    nextSlotToFill = 1
+                    task.wait(0.35)
+
+                -- STATE 3: Jika jendela pemilihan "Choose a herb" sedang terbuka
+                elseif findVisibleTextElement("choose a herb", false) then
+                    local recipe = Constants.PILL_RECIPES[State.selectedPill]
+                    local targetHerb = recipe and recipe[nextSlotToFill] or "Ginseng"
+
+                    local chosen = chooseBestHerbFromList(targetHerb)
+                    if chosen then
+                        nextSlotToFill = (nextSlotToFill % 3) + 1
+                        task.wait(0.45)
+                    else
+                        local backBtn = findVisibleTextElement("back", true)
+                        if backBtn then
+                            triggerGuiClick(backBtn, false, true)
                         end
-                        local recipe = Constants.PILL_RECIPES[State.selectedPill]
-                        if recipe and addHerbObj then
-                            for slotIdx = 1, 3 do
-                                if not State.autoPillActive or isUserTypingOrInMenu() then break end
-                                local currentAddHerb = findElementByText("add herb", true, true)
-                                if currentAddHerb then
-                                    triggerGuiClick(currentAddHerb, false, false)
-                                    task.wait(0.32)
-                                    local chosen = selectBestHerbFromModal(recipe[slotIdx])
-                                    task.wait(0.32)
-                                    if not chosen then
-                                        local backBtn = findElementByText("back", true, true)
-                                        if backBtn then triggerGuiClick(backBtn, false, false) end
-                                        break
-                                    end
-                                end
-                            end
-                            task.wait(0.15)
-                            local finalBrewObj = findElementByText("brew", true, true)
-                            if finalBrewObj and not findElementByText("add herb", true, false) then
-                                triggerGuiClick(finalBrewObj, false, false)
-                                task.wait(0.4)
-                            end
-                        elseif not addHerbObj then
-                            triggerGuiClick(brewObj, false, false)
-                            task.wait(0.4)
+                        task.wait(0.5)
+                    end
+
+                -- STATE 4: Berada di menu utama ALCHEMY CAULDRON
+                else
+                    local brewBtn = findVisibleTextElement("brew", true)
+                    if brewBtn then
+                        local emptySlotBtn = findVisibleTextElement("add herb", true)
+                        if emptySlotBtn then
+                            -- Klik 1 slot "Add herb" dan tunggu dengan smooth sampai menu "Choose a herb" terbuka
+                            triggerGuiClick(emptySlotBtn, false, true)
+                            task.wait(0.45)
+                        else
+                            -- Ketiga slot sudah terisi penuh (tidak ada lagi tombol "Add herb"), klik Brew!
+                            nextSlotToFill = 1
+                            triggerGuiClick(brewBtn, false, true)
+                            task.wait(0.65)
                         end
                     end
                 end
             end
         end
-        task.wait(0.15)
+        task.wait(0.22)
     end
 end)
 
