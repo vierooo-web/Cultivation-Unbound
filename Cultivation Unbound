@@ -1,0 +1,2902 @@
+-- Services
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+
+-- Device Detection (Mobile / PC)
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-------------------------------------------------------------------------
+-- CONFIG SAVE & AUTO-LOAD SYSTEM (DISCONNECT RECOVERY)
+-------------------------------------------------------------------------
+local CONFIG_FILE_NAME = "CultivationHub_SavedConfig.json"
+
+local Config = {
+    autoFarmActive = false,
+    autoPillActive = false,
+    autoBreakthroughActive = false,
+    autoQiOrbActive = false,
+    autoRealmActive = false,
+    autoBodyActive = false,
+    autoKillActive = false,
+    selectedHerb = "Ginseng",
+    selectedPill = "Qi Cultivation Pill",
+    selectedQiZone = "Verdant Valley",
+    selectedBodyZone = "Dusty Courtyard",
+    flySpeed = 60,
+    toggleKeyName = "RightShift"
+}
+
+local function saveConfig()
+    pcall(function()
+        if writefile then
+            local json = HttpService:JSONEncode(Config)
+            writefile(CONFIG_FILE_NAME, json)
+        end
+    end)
+end
+
+local function loadConfig()
+    pcall(function()
+        if isfile and readfile and isfile(CONFIG_FILE_NAME) then
+            local raw = readfile(CONFIG_FILE_NAME)
+            local decoded = HttpService:JSONDecode(raw)
+            if type(decoded) == "table" then
+                for k, v in pairs(decoded) do
+                    if Config[k] ~= nil and type(Config[k]) == type(v) then
+                        Config[k] = v
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- Muat settingan terakhir sebelum membuat UI
+loadConfig()
+
+-- Settings State (Terhubung dengan Config yang sudah di-load)
+local autoFarmActive = Config.autoFarmActive
+local autoPillActive = Config.autoPillActive
+local autoBreakthroughActive = Config.autoBreakthroughActive
+local autoQiOrbActive = Config.autoQiOrbActive
+local autoRealmActive = Config.autoRealmActive
+local autoBodyActive = Config.autoBodyActive
+local autoKillActive = Config.autoKillActive
+local autoSkillKillActive = true
+
+local selectedHerb = Config.selectedHerb
+local selectedPill = Config.selectedPill
+local selectedQiZone = Config.selectedQiZone
+local selectedBodyZone = Config.selectedBodyZone
+local selectedTargetPlayerName = "None"
+
+local FLY_SPEED = Config.flySpeed or 60
+local MIN_SPEED = 10
+local MAX_SPEED = 300
+local WAITING_TIME_AT_HERB = 0.8
+local BLACKLIST_DURATION = 30
+local harvestedBlacklist = {}
+
+-- UI State Variables
+local currentTab = "Auto"
+local uiVisible = true
+local toggleKey = Enum.KeyCode[Config.toggleKeyName] or Enum.KeyCode.RightShift
+
+-- Daftar Qi Zone & Body Zone sesuai tabel game
+local QI_ZONES_LIST = {
+    "Verdant Valley",
+    "Misty Peaks",
+    "Thunder Sanctum",
+    "Celestial Expanse",
+    "Shattered Heavens",
+    "Dao Pinnacle",
+    "Shattered Sky"
+}
+
+local BODY_ZONES_LIST = {
+    "Dusty Courtyard",
+    "Iron Fist Dojo",
+    "Stone Peak Arena",
+    "Jade Colosseum",
+    "Dragon Spine Ridge",
+    "Heaven's Forge",
+    "Immortal Crucible"
+}
+
+-- Resep Pil (Mapping Herb)
+local PILL_RECIPES = {
+    ["Bloodfury Pill"] = {"Azure Lotus", "Golden Fern", "Violet Sage"},
+    ["Body Cultivation Pill"] = {"Verdant Moss", "Verdant Moss", "Golden Fern"},
+    ["Qi Cultivation Pill"] = {"Ginseng", "Ginseng", "Azure Lotus"},
+    ["Vitality Pill"] = {"Ginseng", "Verdant Moss", "Violet Sage"}
+}
+
+-- Urutan Prioritas Tahun Herb (1000Yr -> 100Yr -> 10Yr -> 1Yr)
+local HERB_YEAR_PRIORITY = {
+    {pattern = "1000", score = 4},
+    {pattern = "100",  score = 3},
+    {pattern = "10",   score = 2},
+    {pattern = "1",    score = 1}
+}
+
+-- Data 30 Realm & Jumlah Lapisan Maksimal (Realm 1-23 = 10 Layers, Realm 24-30 = 5 Layers)
+local REALM_MAX_LAYERS = {
+    ["mortal body"] = 10, ["qi refining"] = 10, ["body tempering"] = 10,
+    ["foundation establishment"] = 10, ["meridian opening"] = 10, ["core formation"] = 10,
+    ["nascent soul"] = 10, ["soul transformation"] = 10, ["spirit severing"] = 10,
+    ["dao seeking"] = 10, ["dao comprehension"] = 10, ["immortal ascension"] = 10,
+    ["celestial"] = 10, ["heavenly refinement"] = 10, ["divine sense"] = 10,
+    ["ten thousand laws"] = 10, ["tribulation crossing"] = 10, ["sacred body"] = 10,
+    ["void traversal"] = 10, ["eternal spring"] = 10, ["heaven seizing"] = 10,
+    ["ten thousand dao"] = 10, ["supreme elder"] = 10,
+    ["true immortal"] = 5, ["dao ancestor"] = 5, ["void god"] = 5,
+    ["heaven defying"] = 5, ["world piercing"] = 5, ["reality shatterer"] = 5,
+    ["absolute sovereign"] = 5
+}
+
+local ROMAN_TO_NUMBER = {
+    ["I"] = 1, ["II"] = 2, ["III"] = 3, ["IV"] = 4, ["V"] = 5,
+    ["VI"] = 6, ["VII"] = 7, ["VIII"] = 8, ["IX"] = 9, ["X"] = 10
+}
+
+local COMBAT_SKILL_KEYS = {
+    Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V,
+    Enum.KeyCode.G, Enum.KeyCode.H, Enum.KeyCode.T, Enum.KeyCode.Q
+}
+
+-------------------------------------------------------------------------
+-- CUSTOM DRAGGABLE FUNCTION
+-------------------------------------------------------------------------
+local function makeDraggable(dragTrigger, targetFrame)
+    local dragging = false
+    local dragInput, dragStart, startPos
+
+    dragTrigger.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetFrame.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    dragTrigger.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-------------------------------------------------------------------------
+-- UI CREATION (Responsive Eclipse / Solar Style Hub)
+-------------------------------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CultivationHubGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = false
+
+if syn and syn.protect_gui then
+    syn.protect_gui(ScreenGui)
+    ScreenGui.Parent = game:GetService("CoreGui")
+elseif gethui then
+    ScreenGui.Parent = gethui()
+else
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- Floating Button
+local FloatingBtn = Instance.new("TextButton")
+FloatingBtn.Name = "MobileToggleBtn"
+FloatingBtn.Size = UDim2.new(0, 48, 0, 48)
+FloatingBtn.Position = UDim2.new(0.02, 0, 0.45, 0)
+FloatingBtn.BackgroundColor3 = Color3.fromRGB(45, 32, 58)
+FloatingBtn.Text = "HUB"
+FloatingBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatingBtn.TextSize = 13
+FloatingBtn.Font = Enum.Font.GothamBold
+FloatingBtn.ZIndex = 50
+FloatingBtn.Parent = ScreenGui
+
+local FloatCorner = Instance.new("UICorner")
+FloatCorner.CornerRadius = UDim.new(1, 0)
+FloatCorner.Parent = FloatingBtn
+
+local FloatStroke = Instance.new("UIStroke")
+FloatStroke.Color = Color3.fromRGB(210, 50, 70)
+FloatStroke.Thickness = 2
+FloatStroke.Parent = FloatingBtn
+
+makeDraggable(FloatingBtn, FloatingBtn)
+
+local frameWidth = isMobile and 440 or 540
+local frameHeight = isMobile and 340 or 470
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, frameWidth, 0, frameHeight)
+MainFrame.Position = UDim2.new(0.5, -(frameWidth / 2), 0.5, -(frameHeight / 2))
+MainFrame.BackgroundColor3 = Color3.fromRGB(22, 18, 26)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
+
+local UIScale = Instance.new("UIScale")
+local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+if viewport.Y < 500 then
+    UIScale.Scale = 0.78
+elseif viewport.Y < 720 and isMobile then
+    UIScale.Scale = 0.88
+else
+    UIScale.Scale = 1.0
+end
+UIScale.Parent = MainFrame
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = MainFrame
+
+-- Top Bar
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 36)
+TopBar.BackgroundColor3 = Color3.fromRGB(18, 14, 22)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+
+local TopCorner = Instance.new("UICorner")
+TopCorner.CornerRadius = UDim.new(0, 8)
+TopCorner.Parent = TopBar
+
+makeDraggable(TopBar, MainFrame)
+
+local TitleText = Instance.new("TextLabel")
+TitleText.Size = UDim2.new(1, -100, 1, 0)
+TitleText.Position = UDim2.new(0, 15, 0, 0)
+TitleText.BackgroundTransparency = 1
+TitleText.Text = "Cultivation Hub (Auto-Save Config)"
+TitleText.TextColor3 = Color3.fromRGB(220, 220, 220)
+TitleText.TextSize = 14
+TitleText.Font = Enum.Font.GothamBold
+TitleText.TextXAlignment = Enum.TextXAlignment.Left
+TitleText.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -32, 0.5, -13)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 12
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Parent = TopBar
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 4)
+CloseCorner.Parent = CloseBtn
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Size = UDim2.new(0, 26, 0, 26)
+MinimizeBtn.Position = UDim2.new(1, -64, 0.5, -13)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeBtn.TextSize = 14
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.Parent = TopBar
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 4)
+MinCorner.Parent = MinimizeBtn
+
+-- Sidebar (Auto, Location, Setting)
+local sidebarWidth = isMobile and 110 or 135
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, sidebarWidth, 1, -36)
+Sidebar.Position = UDim2.new(0, 0, 0, 36)
+Sidebar.BackgroundColor3 = Color3.fromRGB(28, 22, 34)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = MainFrame
+
+local SideCorner = Instance.new("UICorner")
+SideCorner.CornerRadius = UDim.new(0, 6)
+SideCorner.Parent = Sidebar
+
+local AutoTabBtn = Instance.new("TextButton")
+AutoTabBtn.Size = UDim2.new(0.9, 0, 0, 32)
+AutoTabBtn.Position = UDim2.new(0.05, 0, 0, 10)
+AutoTabBtn.BackgroundColor3 = Color3.fromRGB(45, 32, 58)
+AutoTabBtn.Text = "Auto"
+AutoTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoTabBtn.TextSize = 13
+AutoTabBtn.Font = Enum.Font.GothamMedium
+AutoTabBtn.Parent = Sidebar
+
+local Tab1Corner = Instance.new("UICorner")
+Tab1Corner.CornerRadius = UDim.new(0, 4)
+Tab1Corner.Parent = AutoTabBtn
+
+local LocationTabBtn = Instance.new("TextButton")
+LocationTabBtn.Size = UDim2.new(0.9, 0, 0, 32)
+LocationTabBtn.Position = UDim2.new(0.05, 0, 0, 48)
+LocationTabBtn.BackgroundColor3 = Color3.fromRGB(28, 22, 34)
+LocationTabBtn.Text = "Location"
+LocationTabBtn.TextColor3 = Color3.fromRGB(160, 160, 160)
+LocationTabBtn.TextSize = 13
+LocationTabBtn.Font = Enum.Font.GothamMedium
+LocationTabBtn.Parent = Sidebar
+
+local TabLocCorner = Instance.new("UICorner")
+TabLocCorner.CornerRadius = UDim.new(0, 4)
+TabLocCorner.Parent = LocationTabBtn
+
+local SettingTabBtn = Instance.new("TextButton")
+SettingTabBtn.Size = UDim2.new(0.9, 0, 0, 32)
+SettingTabBtn.Position = UDim2.new(0.05, 0, 0, 86)
+SettingTabBtn.BackgroundColor3 = Color3.fromRGB(28, 22, 34)
+SettingTabBtn.Text = "Setting"
+SettingTabBtn.TextColor3 = Color3.fromRGB(160, 160, 160)
+SettingTabBtn.TextSize = 13
+SettingTabBtn.Font = Enum.Font.GothamMedium
+SettingTabBtn.Parent = Sidebar
+
+local Tab2Corner = Instance.new("UICorner")
+Tab2Corner.CornerRadius = UDim.new(0, 4)
+Tab2Corner.Parent = SettingTabBtn
+
+local ContentArea = Instance.new("Frame")
+ContentArea.Size = UDim2.new(1, -(sidebarWidth + 10), 1, -46)
+ContentArea.Position = UDim2.new(0, sidebarWidth + 5, 0, 41)
+ContentArea.BackgroundTransparency = 1
+ContentArea.Parent = MainFrame
+
+-- Helper untuk mengatur visual awal Switch Toggle
+local function setSwitchVisual(bg, circle, state, activeColor)
+    local col = activeColor or Color3.fromRGB(60, 180, 80)
+    if state then
+        bg.BackgroundColor3 = col
+        circle.Position = UDim2.new(1, -20, 0.5, -9)
+    else
+        bg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+        circle.Position = UDim2.new(0, 2, 0.5, -9)
+    end
+end
+
+-------------------------------------------------------------------------
+-- PAGE 1: AUTO CATALOG CONTENTS
+-------------------------------------------------------------------------
+local AutoPage = Instance.new("ScrollingFrame")
+AutoPage.Size = UDim2.new(1, 0, 1, 0)
+AutoPage.BackgroundTransparency = 1
+AutoPage.CanvasSize = UDim2.new(0, 0, 0, 840)
+AutoPage.ScrollBarThickness = 5
+AutoPage.ScrollingDirection = Enum.ScrollingDirection.Y
+AutoPage.Visible = true
+AutoPage.Parent = ContentArea
+
+--- SECTION 1: FARM HERBS ---
+local SectionTitle = Instance.new("TextLabel")
+SectionTitle.Size = UDim2.new(1, 0, 0, 20)
+SectionTitle.BackgroundTransparency = 1
+SectionTitle.Text = "Farm Herbs (Priority: 1000Yr > 100Yr > 10Yr > 1Yr)"
+SectionTitle.TextColor3 = Color3.fromRGB(180, 180, 180)
+SectionTitle.TextSize = 12
+SectionTitle.Font = Enum.Font.GothamBold
+SectionTitle.TextXAlignment = Enum.TextXAlignment.Left
+SectionTitle.Parent = AutoPage
+
+local DropdownContainer = Instance.new("Frame")
+DropdownContainer.Size = UDim2.new(0.96, 0, 0, 38)
+DropdownContainer.Position = UDim2.new(0, 0, 0, 25)
+DropdownContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+DropdownContainer.ZIndex = 6
+DropdownContainer.Parent = AutoPage
+
+local DropCorner = Instance.new("UICorner")
+DropCorner.CornerRadius = UDim.new(0, 6)
+DropCorner.Parent = DropdownContainer
+
+local DropLabel = Instance.new("TextLabel")
+DropLabel.Size = UDim2.new(0.48, 0, 1, 0)
+DropLabel.Position = UDim2.new(0, 10, 0, 0)
+DropLabel.BackgroundTransparency = 1
+DropLabel.Text = "Select Herb"
+DropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+DropLabel.TextSize = 12
+DropLabel.Font = Enum.Font.Gotham
+DropLabel.TextXAlignment = Enum.TextXAlignment.Left
+DropLabel.ZIndex = 6
+DropLabel.Parent = DropdownContainer
+
+local DropButton = Instance.new("TextButton")
+DropButton.Size = UDim2.new(0.46, 0, 0.72, 0)
+DropButton.Position = UDim2.new(0.51, 0, 0.14, 0)
+DropButton.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+DropButton.Text = selectedHerb .. " ▾"
+DropButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+DropButton.TextSize = 11
+DropButton.Font = Enum.Font.GothamBold
+DropButton.ZIndex = 7
+DropButton.Parent = DropdownContainer
+
+local BtnCorner = Instance.new("UICorner")
+BtnCorner.CornerRadius = UDim.new(0, 4)
+BtnCorner.Parent = DropButton
+
+local DropList = Instance.new("ScrollingFrame")
+DropList.Size = UDim2.new(1, 0, 0, 110)
+DropList.Position = UDim2.new(0, 0, 1, 4)
+DropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+DropList.Visible = false
+DropList.ZIndex = 20
+DropList.CanvasSize = UDim2.new(0, 0, 0, 155)
+DropList.ScrollBarThickness = 4
+DropList.Parent = DropButton
+
+local ListCorner = Instance.new("UICorner")
+ListCorner.CornerRadius = UDim.new(0, 4)
+ListCorner.Parent = DropList
+
+local herbsList = {"Ginseng", "Azure Lotus", "Golden Fern", "Violet Sage", "Verdant Moss"}
+for i, herbName in ipairs(herbsList) do
+    local optBtn = Instance.new("TextButton")
+    optBtn.Size = UDim2.new(1, -5, 0, 28)
+    optBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 30)
+    optBtn.BackgroundTransparency = 1
+    optBtn.Text = herbName
+    optBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    optBtn.TextSize = 11
+    optBtn.Font = Enum.Font.Gotham
+    optBtn.ZIndex = 21
+    optBtn.Parent = DropList
+    
+    optBtn.Activated:Connect(function()
+        selectedHerb = herbName
+        Config.selectedHerb = herbName
+        DropButton.Text = herbName .. " ▾"
+        DropList.Visible = false
+        saveConfig()
+    end)
+end
+
+-- Toggle Herb Auto Farm
+local ToggleContainer = Instance.new("Frame")
+ToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+ToggleContainer.Position = UDim2.new(0, 0, 0, 70)
+ToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+ToggleContainer.ZIndex = 1
+ToggleContainer.Parent = AutoPage
+
+local TogCorner = Instance.new("UICorner")
+TogCorner.CornerRadius = UDim.new(0, 6)
+TogCorner.Parent = ToggleContainer
+
+local ToggleLabel = Instance.new("TextLabel")
+ToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+ToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+ToggleLabel.BackgroundTransparency = 1
+ToggleLabel.Text = "autofarm herb"
+ToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+ToggleLabel.TextSize = 12
+ToggleLabel.Font = Enum.Font.Gotham
+ToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+ToggleLabel.Parent = ToggleContainer
+
+local SwitchBg = Instance.new("Frame")
+SwitchBg.Size = UDim2.new(0, 44, 0, 22)
+SwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+SwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+SwitchBg.Parent = ToggleContainer
+
+local SwitchCorner = Instance.new("UICorner")
+SwitchCorner.CornerRadius = UDim.new(1, 0)
+SwitchCorner.Parent = SwitchBg
+
+local SwitchCircle = Instance.new("Frame")
+SwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+SwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+SwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+SwitchCircle.Parent = SwitchBg
+
+local CircleCorner = Instance.new("UICorner")
+CircleCorner.CornerRadius = UDim.new(1, 0)
+CircleCorner.Parent = SwitchCircle
+
+setSwitchVisual(SwitchBg, SwitchCircle, autoFarmActive)
+
+local ToggleTrigger = Instance.new("TextButton")
+ToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+ToggleTrigger.BackgroundTransparency = 1
+ToggleTrigger.Text = ""
+ToggleTrigger.ZIndex = 2
+ToggleTrigger.Parent = ToggleContainer
+
+-- Speed Slider & Input
+local SliderContainer = Instance.new("Frame")
+SliderContainer.Size = UDim2.new(0.96, 0, 0, 54)
+SliderContainer.Position = UDim2.new(0, 0, 0, 115)
+SliderContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+SliderContainer.Parent = AutoPage
+
+local SliderCorner = Instance.new("UICorner")
+SliderCorner.CornerRadius = UDim.new(0, 6)
+SliderCorner.Parent = SliderContainer
+
+local SliderLabel = Instance.new("TextLabel")
+SliderLabel.Size = UDim2.new(0.6, 0, 0, 25)
+SliderLabel.Position = UDim2.new(0, 10, 0, 4)
+SliderLabel.BackgroundTransparency = 1
+SliderLabel.Text = "Fly Speed"
+SliderLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+SliderLabel.TextSize = 12
+SliderLabel.Font = Enum.Font.Gotham
+SliderLabel.TextXAlignment = Enum.TextXAlignment.Left
+SliderLabel.Parent = SliderContainer
+
+local SpeedInputBox = Instance.new("TextBox")
+SpeedInputBox.Size = UDim2.new(0, 48, 0, 22)
+SpeedInputBox.Position = UDim2.new(1, -58, 0, 5)
+SpeedInputBox.BackgroundColor3 = Color3.fromRGB(45, 36, 54)
+SpeedInputBox.Text = tostring(FLY_SPEED)
+SpeedInputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+SpeedInputBox.TextSize = 12
+SpeedInputBox.Font = Enum.Font.GothamBold
+SpeedInputBox.Parent = SliderContainer
+
+local BoxCorner = Instance.new("UICorner")
+BoxCorner.CornerRadius = UDim.new(0, 4)
+BoxCorner.Parent = SpeedInputBox
+
+local SliderBar = Instance.new("Frame")
+SliderBar.Size = UDim2.new(0.9, 0, 0, 8)
+SliderBar.Position = UDim2.new(0.05, 0, 0, 36)
+SliderBar.BackgroundColor3 = Color3.fromRGB(20, 16, 24)
+SliderBar.BorderSizePixel = 0
+SliderBar.Parent = SliderContainer
+
+local BarCorner = Instance.new("UICorner")
+BarCorner.CornerRadius = UDim.new(1, 0)
+BarCorner.Parent = SliderBar
+
+local SliderFill = Instance.new("Frame")
+SliderFill.Size = UDim2.new((FLY_SPEED - MIN_SPEED) / (MAX_SPEED - MIN_SPEED), 0, 1, 0)
+SliderFill.BackgroundColor3 = Color3.fromRGB(210, 50, 70)
+SliderFill.BorderSizePixel = 0
+SliderFill.Parent = SliderBar
+
+local FillCorner = Instance.new("UICorner")
+FillCorner.CornerRadius = UDim.new(1, 0)
+FillCorner.Parent = SliderFill
+
+local SliderButton = Instance.new("TextButton")
+SliderButton.Size = UDim2.new(1, 16, 1, 20)
+SliderButton.Position = UDim2.new(0, -8, 0, -10)
+SliderButton.BackgroundTransparency = 1
+SliderButton.Text = ""
+SliderButton.Parent = SliderBar
+
+--- SECTION 2: AUTOCREATE PILLS ---
+local PillSectionTitle = Instance.new("TextLabel")
+PillSectionTitle.Size = UDim2.new(1, 0, 0, 20)
+PillSectionTitle.Position = UDim2.new(0, 0, 0, 180)
+PillSectionTitle.BackgroundTransparency = 1
+PillSectionTitle.Text = "Auto Create Pills (Anywhere + Instant Claim)"
+PillSectionTitle.TextColor3 = Color3.fromRGB(180, 180, 180)
+PillSectionTitle.TextSize = 12
+PillSectionTitle.Font = Enum.Font.GothamBold
+PillSectionTitle.TextXAlignment = Enum.TextXAlignment.Left
+PillSectionTitle.Parent = AutoPage
+
+local PillDropContainer = Instance.new("Frame")
+PillDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+PillDropContainer.Position = UDim2.new(0, 0, 0, 205)
+PillDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+PillDropContainer.ZIndex = 4
+PillDropContainer.Parent = AutoPage
+
+local PillDropCorner = Instance.new("UICorner")
+PillDropCorner.CornerRadius = UDim.new(0, 6)
+PillDropCorner.Parent = PillDropContainer
+
+local PillDropLabel = Instance.new("TextLabel")
+PillDropLabel.Size = UDim2.new(0.45, 0, 1, 0)
+PillDropLabel.Position = UDim2.new(0, 10, 0, 0)
+PillDropLabel.BackgroundTransparency = 1
+PillDropLabel.Text = "Select Pill Recipe"
+PillDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+PillDropLabel.TextSize = 12
+PillDropLabel.Font = Enum.Font.Gotham
+PillDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+PillDropLabel.ZIndex = 4
+PillDropLabel.Parent = PillDropContainer
+
+local PillDropButton = Instance.new("TextButton")
+PillDropButton.Size = UDim2.new(0.5, 0, 0.72, 0)
+PillDropButton.Position = UDim2.new(0.47, 0, 0.14, 0)
+PillDropButton.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+PillDropButton.Text = selectedPill .. " ▾"
+PillDropButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+PillDropButton.TextSize = 10
+PillDropButton.Font = Enum.Font.GothamBold
+PillDropButton.ZIndex = 5
+PillDropButton.Parent = PillDropContainer
+
+local PillBtnCorner = Instance.new("UICorner")
+PillBtnCorner.CornerRadius = UDim.new(0, 4)
+PillBtnCorner.Parent = PillDropButton
+
+local PillDropList = Instance.new("Frame")
+PillDropList.Size = UDim2.new(1, 0, 0, 112)
+PillDropList.Position = UDim2.new(0, 0, 1, 4)
+PillDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+PillDropList.Visible = false
+PillDropList.ZIndex = 18
+PillDropList.Parent = PillDropButton
+
+local PillListCorner = Instance.new("UICorner")
+PillListCorner.CornerRadius = UDim.new(0, 4)
+PillListCorner.Parent = PillDropList
+
+local pillsList = {"Bloodfury Pill", "Body Cultivation Pill", "Qi Cultivation Pill", "Vitality Pill"}
+for i, pillName in ipairs(pillsList) do
+    local optBtn = Instance.new("TextButton")
+    optBtn.Size = UDim2.new(1, -5, 0, 26)
+    optBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 27)
+    optBtn.BackgroundTransparency = 1
+    optBtn.Text = pillName
+    optBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    optBtn.TextSize = 10
+    optBtn.Font = Enum.Font.Gotham
+    optBtn.ZIndex = 19
+    optBtn.Parent = PillDropList
+    
+    optBtn.Activated:Connect(function()
+        selectedPill = pillName
+        Config.selectedPill = pillName
+        PillDropButton.Text = pillName .. " ▾"
+        PillDropList.Visible = false
+        saveConfig()
+    end)
+end
+
+local PillToggleContainer = Instance.new("Frame")
+PillToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+PillToggleContainer.Position = UDim2.new(0, 0, 0, 250)
+PillToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+PillToggleContainer.Parent = AutoPage
+
+local PillTogCorner = Instance.new("UICorner")
+PillTogCorner.CornerRadius = UDim.new(0, 6)
+PillTogCorner.Parent = PillToggleContainer
+
+local PillToggleLabel = Instance.new("TextLabel")
+PillToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+PillToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+PillToggleLabel.BackgroundTransparency = 1
+PillToggleLabel.Text = "Autocreate pills (Anywhere)"
+PillToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+PillToggleLabel.TextSize = 12
+PillToggleLabel.Font = Enum.Font.Gotham
+PillToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+PillToggleLabel.Parent = PillToggleContainer
+
+local PillSwitchBg = Instance.new("Frame")
+PillSwitchBg.Size = UDim2.new(0, 44, 0, 22)
+PillSwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+PillSwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+PillSwitchBg.Parent = PillToggleContainer
+
+local PillSwitchCorner = Instance.new("UICorner")
+PillSwitchCorner.CornerRadius = UDim.new(1, 0)
+PillSwitchCorner.Parent = PillSwitchBg
+
+local PillSwitchCircle = Instance.new("Frame")
+PillSwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+PillSwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+PillSwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+PillSwitchCircle.Parent = PillSwitchBg
+
+local PillCircleCorner = Instance.new("UICorner")
+PillCircleCorner.CornerRadius = UDim.new(1, 0)
+PillCircleCorner.Parent = PillSwitchCircle
+
+setSwitchVisual(PillSwitchBg, PillSwitchCircle, autoPillActive)
+
+local PillToggleTrigger = Instance.new("TextButton")
+PillToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+PillToggleTrigger.BackgroundTransparency = 1
+PillToggleTrigger.Text = ""
+PillToggleTrigger.ZIndex = 2
+PillToggleTrigger.Parent = PillToggleContainer
+
+--- SECTION 3: CULTIVATION, AUTO REALM (M), AUTO BODY (P) & BREAKTHROUGH ---
+local BreakSectionTitle = Instance.new("TextLabel")
+BreakSectionTitle.Size = UDim2.new(1, 0, 0, 20)
+BreakSectionTitle.Position = UDim2.new(0, 0, 0, 298)
+BreakSectionTitle.BackgroundTransparency = 1
+BreakSectionTitle.Text = "Cultivation (Auto Realm & Auto Body) & Breakthrough"
+BreakSectionTitle.TextColor3 = Color3.fromRGB(180, 180, 180)
+BreakSectionTitle.TextSize = 12
+BreakSectionTitle.Font = Enum.Font.GothamBold
+BreakSectionTitle.TextXAlignment = Enum.TextXAlignment.Left
+BreakSectionTitle.Parent = AutoPage
+
+-- Toggle Auto Realm (Key M)
+local RealmToggleContainer = Instance.new("Frame")
+RealmToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+RealmToggleContainer.Position = UDim2.new(0, 0, 0, 323)
+RealmToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+RealmToggleContainer.Parent = AutoPage
+
+local RealmTogCorner = Instance.new("UICorner")
+RealmTogCorner.CornerRadius = UDim.new(0, 6)
+RealmTogCorner.Parent = RealmToggleContainer
+
+local RealmToggleLabel = Instance.new("TextLabel")
+RealmToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+RealmToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+RealmToggleLabel.BackgroundTransparency = 1
+RealmToggleLabel.Text = "Auto Realm (Meditate - Key M)"
+RealmToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+RealmToggleLabel.TextSize = 12
+RealmToggleLabel.Font = Enum.Font.Gotham
+RealmToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+RealmToggleLabel.Parent = RealmToggleContainer
+
+local RealmSwitchBg = Instance.new("Frame")
+RealmSwitchBg.Size = UDim2.new(0, 44, 0, 22)
+RealmSwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+RealmSwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+RealmSwitchBg.Parent = RealmToggleContainer
+
+local RealmSwitchCorner = Instance.new("UICorner")
+RealmSwitchCorner.CornerRadius = UDim.new(1, 0)
+RealmSwitchCorner.Parent = RealmSwitchBg
+
+local RealmSwitchCircle = Instance.new("Frame")
+RealmSwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+RealmSwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+RealmSwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+RealmSwitchCircle.Parent = RealmSwitchBg
+
+local RealmCircleCorner = Instance.new("UICorner")
+RealmCircleCorner.CornerRadius = UDim.new(1, 0)
+RealmCircleCorner.Parent = RealmSwitchCircle
+
+setSwitchVisual(RealmSwitchBg, RealmSwitchCircle, autoRealmActive)
+
+local RealmToggleTrigger = Instance.new("TextButton")
+RealmToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+RealmToggleTrigger.BackgroundTransparency = 1
+RealmToggleTrigger.Text = ""
+RealmToggleTrigger.ZIndex = 2
+RealmToggleTrigger.Parent = RealmToggleContainer
+
+-- Toggle Auto Body (Key P)
+local BodyToggleContainer = Instance.new("Frame")
+BodyToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+BodyToggleContainer.Position = UDim2.new(0, 0, 0, 368)
+BodyToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+BodyToggleContainer.Parent = AutoPage
+
+local BodyTogCorner = Instance.new("UICorner")
+BodyTogCorner.CornerRadius = UDim.new(0, 6)
+BodyTogCorner.Parent = BodyToggleContainer
+
+local BodyToggleLabel = Instance.new("TextLabel")
+BodyToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+BodyToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+BodyToggleLabel.BackgroundTransparency = 1
+BodyToggleLabel.Text = "Auto Body (Train Body - Key P)"
+BodyToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+BodyToggleLabel.TextSize = 12
+BodyToggleLabel.Font = Enum.Font.Gotham
+BodyToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+BodyToggleLabel.Parent = BodyToggleContainer
+
+local BodySwitchBg = Instance.new("Frame")
+BodySwitchBg.Size = UDim2.new(0, 44, 0, 22)
+BodySwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+BodySwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+BodySwitchBg.Parent = BodyToggleContainer
+
+local BodySwitchCorner = Instance.new("UICorner")
+BodySwitchCorner.CornerRadius = UDim.new(1, 0)
+BodySwitchCorner.Parent = BodySwitchBg
+
+local BodySwitchCircle = Instance.new("Frame")
+BodySwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+BodySwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+BodySwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+BodySwitchCircle.Parent = BodySwitchBg
+
+local BodyCircleCorner = Instance.new("UICorner")
+BodyCircleCorner.CornerRadius = UDim.new(1, 0)
+BodyCircleCorner.Parent = BodySwitchCircle
+
+setSwitchVisual(BodySwitchBg, BodySwitchCircle, autoBodyActive)
+
+local BodyToggleTrigger = Instance.new("TextButton")
+BodyToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+BodyToggleTrigger.BackgroundTransparency = 1
+BodyToggleTrigger.Text = ""
+BodyToggleTrigger.ZIndex = 2
+BodyToggleTrigger.Parent = BodyToggleContainer
+
+-- Toggle Auto Breakthrough
+local BreakToggleContainer = Instance.new("Frame")
+BreakToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+BreakToggleContainer.Position = UDim2.new(0, 0, 0, 413)
+BreakToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+BreakToggleContainer.Parent = AutoPage
+
+local BreakTogCorner = Instance.new("UICorner")
+BreakTogCorner.CornerRadius = UDim.new(0, 6)
+BreakTogCorner.Parent = BreakToggleContainer
+
+local BreakToggleLabel = Instance.new("TextLabel")
+BreakToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+BreakToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+BreakToggleLabel.BackgroundTransparency = 1
+BreakToggleLabel.Text = "Auto Breakthrough (All Realms)"
+BreakToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+BreakToggleLabel.TextSize = 12
+BreakToggleLabel.Font = Enum.Font.Gotham
+BreakToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+BreakToggleLabel.Parent = BreakToggleContainer
+
+local BreakSwitchBg = Instance.new("Frame")
+BreakSwitchBg.Size = UDim2.new(0, 44, 0, 22)
+BreakSwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+BreakSwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+BreakSwitchBg.Parent = BreakToggleContainer
+
+local BreakSwitchCorner = Instance.new("UICorner")
+BreakSwitchCorner.CornerRadius = UDim.new(1, 0)
+BreakSwitchCorner.Parent = BreakSwitchBg
+
+local BreakSwitchCircle = Instance.new("Frame")
+BreakSwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+BreakSwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+BreakSwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+BreakSwitchCircle.Parent = BreakSwitchBg
+
+local BreakCircleCorner = Instance.new("UICorner")
+BreakCircleCorner.CornerRadius = UDim.new(1, 0)
+BreakCircleCorner.Parent = BreakSwitchCircle
+
+setSwitchVisual(BreakSwitchBg, BreakSwitchCircle, autoBreakthroughActive)
+
+local BreakToggleTrigger = Instance.new("TextButton")
+BreakToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+BreakToggleTrigger.BackgroundTransparency = 1
+BreakToggleTrigger.Text = ""
+BreakToggleTrigger.ZIndex = 2
+BreakToggleTrigger.Parent = BreakToggleContainer
+
+local RealmStatusLabel = Instance.new("TextLabel")
+RealmStatusLabel.Size = UDim2.new(0.96, 0, 0, 20)
+RealmStatusLabel.Position = UDim2.new(0, 4, 0, 454)
+RealmStatusLabel.BackgroundTransparency = 1
+RealmStatusLabel.Text = autoBreakthroughActive and "Status: Memantau Realm & Qi..." or "Status: Auto Breakthrough Nonaktif"
+RealmStatusLabel.TextColor3 = Color3.fromRGB(160, 210, 170)
+RealmStatusLabel.TextSize = 11
+RealmStatusLabel.Font = Enum.Font.GothamMedium
+RealmStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+RealmStatusLabel.Parent = AutoPage
+
+-- Toggle Auto Click Bonus Qi Orb
+local OrbToggleContainer = Instance.new("Frame")
+OrbToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+OrbToggleContainer.Position = UDim2.new(0, 0, 0, 478)
+OrbToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+OrbToggleContainer.Parent = AutoPage
+
+local OrbTogCorner = Instance.new("UICorner")
+OrbTogCorner.CornerRadius = UDim.new(0, 6)
+OrbTogCorner.Parent = OrbToggleContainer
+
+local OrbToggleLabel = Instance.new("TextLabel")
+OrbToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+OrbToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+OrbToggleLabel.BackgroundTransparency = 1
+OrbToggleLabel.Text = "Auto Click Qi Orb (Smooth)"
+OrbToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+OrbToggleLabel.TextSize = 12
+OrbToggleLabel.Font = Enum.Font.Gotham
+OrbToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+OrbToggleLabel.Parent = OrbToggleContainer
+
+local OrbSwitchBg = Instance.new("Frame")
+OrbSwitchBg.Size = UDim2.new(0, 44, 0, 22)
+OrbSwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+OrbSwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+OrbSwitchBg.Parent = OrbToggleContainer
+
+local OrbSwitchCorner = Instance.new("UICorner")
+OrbSwitchCorner.CornerRadius = UDim.new(1, 0)
+OrbSwitchCorner.Parent = OrbSwitchBg
+
+local OrbSwitchCircle = Instance.new("Frame")
+OrbSwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+OrbSwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+OrbSwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+OrbSwitchCircle.Parent = OrbSwitchBg
+
+local OrbCircleCorner = Instance.new("UICorner")
+OrbCircleCorner.CornerRadius = UDim.new(1, 0)
+OrbCircleCorner.Parent = OrbSwitchCircle
+
+setSwitchVisual(OrbSwitchBg, OrbSwitchCircle, autoQiOrbActive)
+
+local OrbToggleTrigger = Instance.new("TextButton")
+OrbToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+OrbToggleTrigger.BackgroundTransparency = 1
+OrbToggleTrigger.Text = ""
+OrbToggleTrigger.ZIndex = 2
+OrbToggleTrigger.Parent = OrbToggleContainer
+
+--- SECTION 4: AUTO KILL PLAYER ---
+local KillSectionTitle = Instance.new("TextLabel")
+KillSectionTitle.Size = UDim2.new(1, 0, 0, 20)
+KillSectionTitle.Position = UDim2.new(0, 0, 0, 528)
+KillSectionTitle.BackgroundTransparency = 1
+KillSectionTitle.Text = "Auto Kill Player (Target Lock & Skills)"
+KillSectionTitle.TextColor3 = Color3.fromRGB(220, 120, 130)
+KillSectionTitle.TextSize = 12
+KillSectionTitle.Font = Enum.Font.GothamBold
+KillSectionTitle.TextXAlignment = Enum.TextXAlignment.Left
+KillSectionTitle.Parent = AutoPage
+
+local PlayerDropContainer = Instance.new("Frame")
+PlayerDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+PlayerDropContainer.Position = UDim2.new(0, 0, 0, 553)
+PlayerDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+PlayerDropContainer.ZIndex = 3
+PlayerDropContainer.Parent = AutoPage
+
+local PlayerDropCorner = Instance.new("UICorner")
+PlayerDropCorner.CornerRadius = UDim.new(0, 6)
+PlayerDropCorner.Parent = PlayerDropContainer
+
+local PlayerDropLabel = Instance.new("TextLabel")
+PlayerDropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+PlayerDropLabel.Position = UDim2.new(0, 10, 0, 0)
+PlayerDropLabel.BackgroundTransparency = 1
+PlayerDropLabel.Text = "Select Player"
+PlayerDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+PlayerDropLabel.TextSize = 12
+PlayerDropLabel.Font = Enum.Font.Gotham
+PlayerDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+PlayerDropLabel.ZIndex = 3
+PlayerDropLabel.Parent = PlayerDropContainer
+
+local PlayerDropButton = Instance.new("TextButton")
+PlayerDropButton.Size = UDim2.new(0.52, 0, 0.72, 0)
+PlayerDropButton.Position = UDim2.new(0.45, 0, 0.14, 0)
+PlayerDropButton.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+PlayerDropButton.Text = "Pilih Target ▾"
+PlayerDropButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+PlayerDropButton.TextSize = 10
+PlayerDropButton.Font = Enum.Font.GothamBold
+PlayerDropButton.ZIndex = 4
+PlayerDropButton.Parent = PlayerDropContainer
+
+local PlayerBtnCorner = Instance.new("UICorner")
+PlayerBtnCorner.CornerRadius = UDim.new(0, 4)
+PlayerBtnCorner.Parent = PlayerDropButton
+
+local PlayerDropList = Instance.new("ScrollingFrame")
+PlayerDropList.Size = UDim2.new(1, 0, 0, 120)
+PlayerDropList.Position = UDim2.new(0, 0, 1, 4)
+PlayerDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+PlayerDropList.Visible = false
+PlayerDropList.ZIndex = 25
+PlayerDropList.CanvasSize = UDim2.new(0, 0, 0, 120)
+PlayerDropList.ScrollBarThickness = 4
+PlayerDropList.Parent = PlayerDropButton
+
+local PlayerListCorner = Instance.new("UICorner")
+PlayerListCorner.CornerRadius = UDim.new(0, 4)
+PlayerListCorner.Parent = PlayerDropList
+
+local function refreshPlayerDropdown()
+    for _, ch in pairs(PlayerDropList:GetChildren()) do
+        if ch:IsA("TextButton") then
+            ch:Destroy()
+        end
+    end
+
+    local allPlayers = Players:GetPlayers()
+    local idx = 0
+    for _, plr in ipairs(allPlayers) do
+        if plr ~= LocalPlayer then
+            idx = idx + 1
+            local pBtn = Instance.new("TextButton")
+            pBtn.Size = UDim2.new(1, -5, 0, 26)
+            pBtn.Position = UDim2.new(0, 0, 0, (idx - 1) * 28)
+            pBtn.BackgroundTransparency = 1
+            pBtn.Text = plr.DisplayName .. " (@" .. plr.Name .. ")"
+            pBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+            pBtn.TextSize = 10
+            pBtn.Font = Enum.Font.Gotham
+            pBtn.ZIndex = 26
+            pBtn.Parent = PlayerDropList
+
+            pBtn.Activated:Connect(function()
+                selectedTargetPlayerName = plr.Name
+                PlayerDropButton.Text = plr.Name .. " ▾"
+                PlayerDropList.Visible = false
+            end)
+        end
+    end
+    PlayerDropList.CanvasSize = UDim2.new(0, 0, 0, math.max(120, idx * 28))
+end
+
+refreshPlayerDropdown()
+Players.PlayerAdded:Connect(refreshPlayerDropdown)
+Players.PlayerRemoving:Connect(function(plr)
+    if plr.Name == selectedTargetPlayerName then
+        selectedTargetPlayerName = "None"
+        PlayerDropButton.Text = "Pilih Target ▾"
+    end
+    refreshPlayerDropdown()
+end)
+
+local KillToggleContainer = Instance.new("Frame")
+KillToggleContainer.Size = UDim2.new(0.96, 0, 0, 38)
+KillToggleContainer.Position = UDim2.new(0, 0, 0, 598)
+KillToggleContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+KillToggleContainer.Parent = AutoPage
+
+local KillTogCorner = Instance.new("UICorner")
+KillTogCorner.CornerRadius = UDim.new(0, 6)
+KillTogCorner.Parent = KillToggleContainer
+
+local KillToggleLabel = Instance.new("TextLabel")
+KillToggleLabel.Size = UDim2.new(0.6, 0, 1, 0)
+KillToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+KillToggleLabel.BackgroundTransparency = 1
+KillToggleLabel.Text = "Auto Kill (Lock + Sword & Skills)"
+KillToggleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+KillToggleLabel.TextSize = 12
+KillToggleLabel.Font = Enum.Font.Gotham
+KillToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+KillToggleLabel.Parent = KillToggleContainer
+
+local KillSwitchBg = Instance.new("Frame")
+KillSwitchBg.Size = UDim2.new(0, 44, 0, 22)
+KillSwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+KillSwitchBg.BackgroundColor3 = Color3.fromRGB(60, 50, 65)
+KillSwitchBg.Parent = KillToggleContainer
+
+local KillSwitchCorner = Instance.new("UICorner")
+KillSwitchCorner.CornerRadius = UDim.new(1, 0)
+KillSwitchCorner.Parent = KillSwitchBg
+
+local KillSwitchCircle = Instance.new("Frame")
+KillSwitchCircle.Size = UDim2.new(0, 18, 0, 18)
+KillSwitchCircle.Position = UDim2.new(0, 2, 0.5, -9)
+KillSwitchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+KillSwitchCircle.Parent = KillSwitchBg
+
+local KillCircleCorner = Instance.new("UICorner")
+KillCircleCorner.CornerRadius = UDim.new(1, 0)
+KillCircleCorner.Parent = KillSwitchCircle
+
+setSwitchVisual(KillSwitchBg, KillSwitchCircle, autoKillActive, Color3.fromRGB(210, 50, 70))
+
+local KillToggleTrigger = Instance.new("TextButton")
+KillToggleTrigger.Size = UDim2.new(1, 0, 1, 0)
+KillToggleTrigger.BackgroundTransparency = 1
+KillToggleTrigger.Text = ""
+KillToggleTrigger.ZIndex = 2
+KillToggleTrigger.Parent = KillToggleContainer
+
+-------------------------------------------------------------------------
+-- PAGE 2: LOCATION CATALOG CONTENTS (QI ZONE & BODY ZONE + SOLAR HUB BOX)
+-------------------------------------------------------------------------
+local LocationPage = Instance.new("ScrollingFrame")
+LocationPage.Size = UDim2.new(1, 0, 1, 0)
+LocationPage.BackgroundTransparency = 1
+LocationPage.CanvasSize = UDim2.new(0, 0, 0, 360)
+LocationPage.ScrollBarThickness = 5
+LocationPage.ScrollingDirection = Enum.ScrollingDirection.Y
+LocationPage.Visible = false
+LocationPage.Parent = ContentArea
+
+--- QI ZONE SECTION ---
+local QiZoneHeader = Instance.new("TextLabel")
+QiZoneHeader.Size = UDim2.new(1, 0, 0, 22)
+QiZoneHeader.Position = UDim2.new(0, 0, 0, 5)
+QiZoneHeader.BackgroundTransparency = 1
+QiZoneHeader.Text = "Qi Zone"
+QiZoneHeader.TextColor3 = Color3.fromRGB(195, 190, 175)
+QiZoneHeader.TextSize = 14
+QiZoneHeader.Font = Enum.Font.GothamBold
+QiZoneHeader.TextXAlignment = Enum.TextXAlignment.Left
+QiZoneHeader.Parent = LocationPage
+
+local QiZoneDropContainer = Instance.new("Frame")
+QiZoneDropContainer.Size = UDim2.new(0.96, 0, 0, 40)
+QiZoneDropContainer.Position = UDim2.new(0, 0, 0, 30)
+QiZoneDropContainer.BackgroundColor3 = Color3.fromRGB(36, 33, 24)
+QiZoneDropContainer.ZIndex = 8
+QiZoneDropContainer.Parent = LocationPage
+
+local QiDropCorner = Instance.new("UICorner")
+QiDropCorner.CornerRadius = UDim.new(0, 6)
+QiDropCorner.Parent = QiZoneDropContainer
+
+local QiDropStroke = Instance.new("UIStroke")
+QiDropStroke.Color = Color3.fromRGB(85, 78, 52)
+QiDropStroke.Thickness = 1
+QiDropStroke.Parent = QiZoneDropContainer
+
+local QiDropLabel = Instance.new("TextLabel")
+QiDropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+QiDropLabel.Position = UDim2.new(0, 12, 0, 0)
+QiDropLabel.BackgroundTransparency = 1
+QiDropLabel.Text = "Select Qi Zone"
+QiDropLabel.TextColor3 = Color3.fromRGB(220, 215, 200)
+QiDropLabel.TextSize = 12
+QiDropLabel.Font = Enum.Font.GothamMedium
+QiDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+QiDropLabel.ZIndex = 8
+QiDropLabel.Parent = QiZoneDropContainer
+
+local QiDropBtn = Instance.new("TextButton")
+QiDropBtn.Size = UDim2.new(0.52, 0, 0.72, 0)
+QiDropBtn.Position = UDim2.new(0.45, 0, 0.14, 0)
+QiDropBtn.BackgroundColor3 = Color3.fromRGB(52, 47, 34)
+QiDropBtn.Text = selectedQiZone .. " ▾"
+QiDropBtn.TextColor3 = Color3.fromRGB(255, 245, 215)
+QiDropBtn.TextSize = 11
+QiDropBtn.Font = Enum.Font.GothamBold
+QiDropBtn.ZIndex = 9
+QiDropBtn.Parent = QiZoneDropContainer
+
+local QiBtnCorner = Instance.new("UICorner")
+QiBtnCorner.CornerRadius = UDim.new(0, 4)
+QiBtnCorner.Parent = QiDropBtn
+
+local QiDropList = Instance.new("ScrollingFrame")
+QiDropList.Size = UDim2.new(1, 0, 0, 135)
+QiDropList.Position = UDim2.new(0, 0, 1, 4)
+QiDropList.BackgroundColor3 = Color3.fromRGB(42, 38, 28)
+QiDropList.Visible = false
+QiDropList.ZIndex = 30
+QiDropList.CanvasSize = UDim2.new(0, 0, 0, #QI_ZONES_LIST * 28)
+QiDropList.ScrollBarThickness = 4
+QiDropList.Parent = QiDropBtn
+
+local QiListCorner = Instance.new("UICorner")
+QiListCorner.CornerRadius = UDim.new(0, 4)
+QiListCorner.Parent = QiDropList
+
+-- Tombol Teleport Qi Zone (Bergaya Solar Hub sesuai gambar referensi ke-2)
+local QiTeleportBox = Instance.new("TextButton")
+QiTeleportBox.Name = "QiTeleportBox"
+QiTeleportBox.Size = UDim2.new(0.96, 0, 0, 42)
+QiTeleportBox.Position = UDim2.new(0, 0, 0, 78)
+QiTeleportBox.BackgroundColor3 = Color3.fromRGB(43, 39, 27)
+QiTeleportBox.Text = ""
+QiTeleportBox.AutoButtonColor = true
+QiTeleportBox.ZIndex = 2
+QiTeleportBox.Parent = LocationPage
+
+local QiTpCorner = Instance.new("UICorner")
+QiTpCorner.CornerRadius = UDim.new(0, 6)
+QiTpCorner.Parent = QiTeleportBox
+
+local QiTpStroke = Instance.new("UIStroke")
+QiTpStroke.Color = Color3.fromRGB(98, 88, 56)
+QiTpStroke.Thickness = 1.2
+QiTpStroke.Parent = QiTeleportBox
+
+local QiTpText = Instance.new("TextLabel")
+QiTpText.Size = UDim2.new(1, -50, 1, 0)
+QiTpText.Position = UDim2.new(0, 14, 0, 0)
+QiTpText.BackgroundTransparency = 1
+QiTpText.Text = "Teleport To " .. selectedQiZone
+QiTpText.TextColor3 = Color3.fromRGB(240, 238, 230)
+QiTpText.TextSize = 13
+QiTpText.Font = Enum.Font.GothamBold
+QiTpText.TextXAlignment = Enum.TextXAlignment.Left
+QiTpText.ZIndex = 3
+QiTpText.Parent = QiTeleportBox
+
+local QiTpIcon = Instance.new("TextLabel")
+QiTpIcon.Size = UDim2.new(0, 32, 0, 32)
+QiTpIcon.Position = UDim2.new(1, -38, 0.5, -16)
+QiTpIcon.BackgroundTransparency = 1
+QiTpIcon.Text = "✵"
+QiTpIcon.TextColor3 = Color3.fromRGB(245, 240, 225)
+QiTpIcon.TextSize = 19
+QiTpIcon.Font = Enum.Font.GothamBold
+QiTpIcon.ZIndex = 3
+QiTpIcon.Parent = QiTeleportBox
+
+for i, zoneName in ipairs(QI_ZONES_LIST) do
+    local zBtn = Instance.new("TextButton")
+    zBtn.Size = UDim2.new(1, -5, 0, 26)
+    zBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 28)
+    zBtn.BackgroundTransparency = 1
+    zBtn.Text = zoneName
+    zBtn.TextColor3 = Color3.fromRGB(235, 230, 215)
+    zBtn.TextSize = 11
+    zBtn.Font = Enum.Font.Gotham
+    zBtn.ZIndex = 31
+    zBtn.Parent = QiDropList
+
+    zBtn.Activated:Connect(function()
+        selectedQiZone = zoneName
+        Config.selectedQiZone = zoneName
+        QiDropBtn.Text = zoneName .. " ▾"
+        QiTpText.Text = "Teleport To " .. zoneName
+        QiDropList.Visible = false
+        saveConfig()
+    end)
+end
+
+--- BODY ZONE SECTION ---
+local BodyZoneHeader = Instance.new("TextLabel")
+BodyZoneHeader.Size = UDim2.new(1, 0, 0, 22)
+BodyZoneHeader.Position = UDim2.new(0, 0, 0, 140)
+BodyZoneHeader.BackgroundTransparency = 1
+BodyZoneHeader.Text = "Body Zone"
+BodyZoneHeader.TextColor3 = Color3.fromRGB(195, 190, 175)
+BodyZoneHeader.TextSize = 14
+BodyZoneHeader.Font = Enum.Font.GothamBold
+BodyZoneHeader.TextXAlignment = Enum.TextXAlignment.Left
+BodyZoneHeader.Parent = LocationPage
+
+local BodyZoneDropContainer = Instance.new("Frame")
+BodyZoneDropContainer.Size = UDim2.new(0.96, 0, 0, 40)
+BodyZoneDropContainer.Position = UDim2.new(0, 0, 0, 165)
+BodyZoneDropContainer.BackgroundColor3 = Color3.fromRGB(36, 33, 24)
+BodyZoneDropContainer.ZIndex = 5
+BodyZoneDropContainer.Parent = LocationPage
+
+local BodyDropCorner = Instance.new("UICorner")
+BodyDropCorner.CornerRadius = UDim.new(0, 6)
+BodyDropCorner.Parent = BodyZoneDropContainer
+
+local BodyDropStroke = Instance.new("UIStroke")
+BodyDropStroke.Color = Color3.fromRGB(85, 78, 52)
+BodyDropStroke.Thickness = 1
+BodyDropStroke.Parent = BodyZoneDropContainer
+
+local BodyDropLabel = Instance.new("TextLabel")
+BodyDropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+BodyDropLabel.Position = UDim2.new(0, 12, 0, 0)
+BodyDropLabel.BackgroundTransparency = 1
+BodyDropLabel.Text = "Select Body Zone"
+BodyDropLabel.TextColor3 = Color3.fromRGB(220, 215, 200)
+BodyDropLabel.TextSize = 12
+BodyDropLabel.Font = Enum.Font.GothamMedium
+BodyDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+BodyDropLabel.ZIndex = 5
+BodyDropLabel.Parent = BodyZoneDropContainer
+
+local BodyDropBtn = Instance.new("TextButton")
+BodyDropBtn.Size = UDim2.new(0.52, 0, 0.72, 0)
+BodyDropBtn.Position = UDim2.new(0.45, 0, 0.14, 0)
+BodyDropBtn.BackgroundColor3 = Color3.fromRGB(52, 47, 34)
+BodyDropBtn.Text = selectedBodyZone .. " ▾"
+BodyDropBtn.TextColor3 = Color3.fromRGB(255, 245, 215)
+BodyDropBtn.TextSize = 11
+BodyDropBtn.Font = Enum.Font.GothamBold
+BodyDropBtn.ZIndex = 6
+BodyDropBtn.Parent = BodyZoneDropContainer
+
+local BodyBtnCorner = Instance.new("UICorner")
+BodyBtnCorner.CornerRadius = UDim.new(0, 4)
+BodyBtnCorner.Parent = BodyDropBtn
+
+local BodyDropList = Instance.new("ScrollingFrame")
+BodyDropList.Size = UDim2.new(1, 0, 0, 135)
+BodyDropList.Position = UDim2.new(0, 0, 1, 4)
+BodyDropList.BackgroundColor3 = Color3.fromRGB(42, 38, 28)
+BodyDropList.Visible = false
+BodyDropList.ZIndex = 28
+BodyDropList.CanvasSize = UDim2.new(0, 0, 0, #BODY_ZONES_LIST * 28)
+BodyDropList.ScrollBarThickness = 4
+BodyDropList.Parent = BodyDropBtn
+
+local BodyListCorner = Instance.new("UICorner")
+BodyListCorner.CornerRadius = UDim.new(0, 4)
+BodyListCorner.Parent = BodyDropList
+
+-- Tombol Teleport Body Zone (Bergaya Solar Hub sesuai gambar referensi ke-2)
+local BodyTeleportBox = Instance.new("TextButton")
+BodyTeleportBox.Name = "BodyTeleportBox"
+BodyTeleportBox.Size = UDim2.new(0.96, 0, 0, 42)
+BodyTeleportBox.Position = UDim2.new(0, 0, 0, 213)
+BodyTeleportBox.BackgroundColor3 = Color3.fromRGB(43, 39, 27)
+BodyTeleportBox.Text = ""
+BodyTeleportBox.AutoButtonColor = true
+BodyTeleportBox.ZIndex = 2
+BodyTeleportBox.Parent = LocationPage
+
+local BodyTpCorner = Instance.new("UICorner")
+BodyTpCorner.CornerRadius = UDim.new(0, 6)
+BodyTpCorner.Parent = BodyTeleportBox
+
+local BodyTpStroke = Instance.new("UIStroke")
+BodyTpStroke.Color = Color3.fromRGB(98, 88, 56)
+BodyTpStroke.Thickness = 1.2
+BodyTpStroke.Parent = BodyTeleportBox
+
+local BodyTpText = Instance.new("TextLabel")
+BodyTpText.Size = UDim2.new(1, -50, 1, 0)
+BodyTpText.Position = UDim2.new(0, 14, 0, 0)
+BodyTpText.BackgroundTransparency = 1
+BodyTpText.Text = "Teleport To " .. selectedBodyZone
+BodyTpText.TextColor3 = Color3.fromRGB(240, 238, 230)
+BodyTpText.TextSize = 13
+BodyTpText.Font = Enum.Font.GothamBold
+BodyTpText.TextXAlignment = Enum.TextXAlignment.Left
+BodyTpText.ZIndex = 3
+BodyTpText.Parent = BodyTeleportBox
+
+local BodyTpIcon = Instance.new("TextLabel")
+BodyTpIcon.Size = UDim2.new(0, 32, 0, 32)
+BodyTpIcon.Position = UDim2.new(1, -38, 0.5, -16)
+BodyTpIcon.BackgroundTransparency = 1
+BodyTpIcon.Text = "✵"
+BodyTpIcon.TextColor3 = Color3.fromRGB(245, 240, 225)
+BodyTpIcon.TextSize = 19
+BodyTpIcon.Font = Enum.Font.GothamBold
+BodyTpIcon.ZIndex = 3
+BodyTpIcon.Parent = BodyTeleportBox
+
+for i, zoneName in ipairs(BODY_ZONES_LIST) do
+    local zBtn = Instance.new("TextButton")
+    zBtn.Size = UDim2.new(1, -5, 0, 26)
+    zBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 28)
+    zBtn.BackgroundTransparency = 1
+    zBtn.Text = zoneName
+    zBtn.TextColor3 = Color3.fromRGB(235, 230, 215)
+    zBtn.TextSize = 11
+    zBtn.Font = Enum.Font.Gotham
+    zBtn.ZIndex = 29
+    zBtn.Parent = BodyDropList
+
+    zBtn.Activated:Connect(function()
+        selectedBodyZone = zoneName
+        Config.selectedBodyZone = zoneName
+        BodyDropBtn.Text = zoneName .. " ▾"
+        BodyTpText.Text = "Teleport To " .. zoneName
+        BodyDropList.Visible = false
+        saveConfig()
+    end)
+end
+
+local ZoneStatusLabel = Instance.new("TextLabel")
+ZoneStatusLabel.Size = UDim2.new(0.96, 0, 0, 26)
+ZoneStatusLabel.Position = UDim2.new(0, 4, 0, 265)
+ZoneStatusLabel.BackgroundTransparency = 1
+ZoneStatusLabel.Text = "Status Location: Pilih Qi/Body Zone lalu tekan tombol Teleport."
+ZoneStatusLabel.TextColor3 = Color3.fromRGB(180, 210, 160)
+ZoneStatusLabel.TextSize = 11
+ZoneStatusLabel.Font = Enum.Font.GothamMedium
+ZoneStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+ZoneStatusLabel.Parent = LocationPage
+
+-------------------------------------------------------------------------
+-- PAGE 3: SETTING CONTENTS
+-------------------------------------------------------------------------
+local SettingPage = Instance.new("Frame")
+SettingPage.Size = UDim2.new(1, 0, 1, 0)
+SettingPage.BackgroundTransparency = 1
+SettingPage.Visible = false
+SettingPage.Parent = ContentArea
+
+local SettingTitle = Instance.new("TextLabel")
+SettingTitle.Size = UDim2.new(1, 0, 0, 20)
+SettingTitle.BackgroundTransparency = 1
+SettingTitle.Text = "UI Keybind & Auto-Save Config"
+SettingTitle.TextColor3 = Color3.fromRGB(180, 180, 180)
+SettingTitle.TextSize = 13
+SettingTitle.Font = Enum.Font.GothamBold
+SettingTitle.TextXAlignment = Enum.TextXAlignment.Left
+SettingTitle.Parent = SettingPage
+
+local KeybindContainer = Instance.new("Frame")
+KeybindContainer.Size = UDim2.new(0.96, 0, 0, 38)
+KeybindContainer.Position = UDim2.new(0, 0, 0, 25)
+KeybindContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+KeybindContainer.Parent = SettingPage
+
+local KeyCorner = Instance.new("UICorner")
+KeyCorner.CornerRadius = UDim.new(0, 6)
+KeyCorner.Parent = KeybindContainer
+
+local KeyLabel = Instance.new("TextLabel")
+KeyLabel.Size = UDim2.new(0.6, 0, 1, 0)
+KeyLabel.Position = UDim2.new(0, 10, 0, 0)
+KeyLabel.BackgroundTransparency = 1
+KeyLabel.Text = "PC Toggle Key"
+KeyLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+KeyLabel.TextSize = 12
+KeyLabel.Font = Enum.Font.Gotham
+KeyLabel.TextXAlignment = Enum.TextXAlignment.Left
+KeyLabel.Parent = KeybindContainer
+
+local KeyInputBox = Instance.new("TextBox")
+KeyInputBox.Size = UDim2.new(0, 95, 0, 24)
+KeyInputBox.Position = UDim2.new(1, -105, 0.5, -12)
+KeyInputBox.BackgroundColor3 = Color3.fromRGB(45, 36, 54)
+KeyInputBox.Text = toggleKey.Name
+KeyInputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeyInputBox.TextSize = 11
+KeyInputBox.Font = Enum.Font.GothamBold
+KeyInputBox.Parent = KeybindContainer
+
+local KeyBoxCorner = Instance.new("UICorner")
+KeyBoxCorner.CornerRadius = UDim.new(0, 4)
+KeyBoxCorner.Parent = KeyInputBox
+
+local ResetConfigBtn = Instance.new("TextButton")
+ResetConfigBtn.Size = UDim2.new(0.96, 0, 0, 36)
+ResetConfigBtn.Position = UDim2.new(0, 0, 0, 72)
+ResetConfigBtn.BackgroundColor3 = Color3.fromRGB(140, 45, 55)
+ResetConfigBtn.Text = "Reset Saved Config to Default"
+ResetConfigBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ResetConfigBtn.TextSize = 12
+ResetConfigBtn.Font = Enum.Font.GothamBold
+ResetConfigBtn.Parent = SettingPage
+
+local ResetCorner = Instance.new("UICorner")
+ResetCorner.CornerRadius = UDim.new(0, 6)
+ResetCorner.Parent = ResetConfigBtn
+
+local InfoBox = Instance.new("TextLabel")
+InfoBox.Size = UDim2.new(0.96, 0, 0, 130)
+InfoBox.Position = UDim2.new(0, 0, 0, 118)
+InfoBox.BackgroundTransparency = 1
+InfoBox.TextWrapped = true
+InfoBox.Text = "• Auto-Save Config: Semua status fitur otomatis tersimpan di '" .. CONFIG_FILE_NAME .. "' dan langsung pulih saat reconnect.\n• Auto Realm (Key M) & Auto Body (Key P) bekerja terpisah.\n• Katalog Location: Mendeteksi titik tengah buff Qi Zone & Body Zone secara presisi."
+InfoBox.TextColor3 = Color3.fromRGB(160, 160, 160)
+InfoBox.TextSize = 11
+InfoBox.Font = Enum.Font.Gotham
+InfoBox.TextXAlignment = Enum.TextXAlignment.Left
+InfoBox.TextYAlignment = Enum.TextYAlignment.Top
+InfoBox.Parent = SettingPage
+
+-------------------------------------------------------------------------
+-- UI NAVIGATION & EVENTS
+-------------------------------------------------------------------------
+local function switchTab(tabName)
+    currentTab = tabName
+    AutoPage.Visible = (tabName == "Auto")
+    LocationPage.Visible = (tabName == "Location")
+    SettingPage.Visible = (tabName == "Setting")
+
+    AutoTabBtn.BackgroundColor3 = (tabName == "Auto") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+    AutoTabBtn.TextColor3 = (tabName == "Auto") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+
+    LocationTabBtn.BackgroundColor3 = (tabName == "Location") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+    LocationTabBtn.TextColor3 = (tabName == "Location") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+
+    SettingTabBtn.BackgroundColor3 = (tabName == "Setting") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+    SettingTabBtn.TextColor3 = (tabName == "Setting") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+end
+
+FloatingBtn.Activated:Connect(function()
+    uiVisible = not uiVisible
+    MainFrame.Visible = uiVisible
+end)
+
+AutoTabBtn.Activated:Connect(function() switchTab("Auto") end)
+LocationTabBtn.Activated:Connect(function() switchTab("Location") end)
+SettingTabBtn.Activated:Connect(function() switchTab("Setting") end)
+
+CloseBtn.Activated:Connect(function()
+    autoFarmActive = false
+    autoPillActive = false
+    autoBreakthroughActive = false
+    autoQiOrbActive = false
+    autoRealmActive = false
+    autoBodyActive = false
+    autoKillActive = false
+    ScreenGui:Destroy()
+end)
+
+local isMinimized = false
+MinimizeBtn.Activated:Connect(function()
+    isMinimized = not isMinimized
+    Sidebar.Visible = not isMinimized
+    ContentArea.Visible = not isMinimized
+    if isMinimized then
+        MainFrame.Size = UDim2.new(0, frameWidth, 0, 36)
+        MinimizeBtn.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, frameWidth, 0, frameHeight)
+        MinimizeBtn.Text = "-"
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == toggleKey then
+        uiVisible = not uiVisible
+        MainFrame.Visible = uiVisible
+    end
+end)
+
+KeyInputBox.Focused:Connect(function()
+    KeyInputBox.Text = "..."
+end)
+
+UserInputService.InputBegan:Connect(function(input)
+    if KeyInputBox:IsFocused() and input.UserInputType == Enum.UserInputType.Keyboard then
+        toggleKey = input.KeyCode
+        Config.toggleKeyName = toggleKey.Name
+        KeyInputBox.Text = toggleKey.Name
+        KeyInputBox:ReleaseFocus()
+        saveConfig()
+    end
+end)
+
+ResetConfigBtn.Activated:Connect(function()
+    pcall(function()
+        if delfile and isfile and isfile(CONFIG_FILE_NAME) then
+            delfile(CONFIG_FILE_NAME)
+        end
+    end)
+    ResetConfigBtn.Text = "Config Berhasil Direset!"
+    task.wait(1.5)
+    ResetConfigBtn.Text = "Reset Saved Config to Default"
+end)
+
+DropButton.Activated:Connect(function()
+    DropList.Visible = not DropList.Visible
+    PillDropList.Visible = false
+    PlayerDropList.Visible = false
+end)
+
+PillDropButton.Activated:Connect(function()
+    PillDropList.Visible = not PillDropList.Visible
+    DropList.Visible = false
+    PlayerDropList.Visible = false
+end)
+
+PlayerDropButton.Activated:Connect(function()
+    refreshPlayerDropdown()
+    PlayerDropList.Visible = not PlayerDropList.Visible
+    DropList.Visible = false
+    PillDropList.Visible = false
+end)
+
+QiDropBtn.Activated:Connect(function()
+    QiDropList.Visible = not QiDropList.Visible
+    BodyDropList.Visible = false
+end)
+
+BodyDropBtn.Activated:Connect(function()
+    BodyDropList.Visible = not BodyDropList.Visible
+    QiDropList.Visible = false
+end)
+
+ToggleTrigger.Activated:Connect(function()
+    autoFarmActive = not autoFarmActive
+    Config.autoFarmActive = autoFarmActive
+    TweenService:Create(SwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoFarmActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(SwitchCircle, TweenInfo.new(0.2), {Position = autoFarmActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+PillToggleTrigger.Activated:Connect(function()
+    autoPillActive = not autoPillActive
+    Config.autoPillActive = autoPillActive
+    TweenService:Create(PillSwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoPillActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(PillSwitchCircle, TweenInfo.new(0.2), {Position = autoPillActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+RealmToggleTrigger.Activated:Connect(function()
+    autoRealmActive = not autoRealmActive
+    Config.autoRealmActive = autoRealmActive
+    TweenService:Create(RealmSwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoRealmActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(RealmSwitchCircle, TweenInfo.new(0.2), {Position = autoRealmActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+BodyToggleTrigger.Activated:Connect(function()
+    autoBodyActive = not autoBodyActive
+    Config.autoBodyActive = autoBodyActive
+    TweenService:Create(BodySwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoBodyActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(BodySwitchCircle, TweenInfo.new(0.2), {Position = autoBodyActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+BreakToggleTrigger.Activated:Connect(function()
+    autoBreakthroughActive = not autoBreakthroughActive
+    Config.autoBreakthroughActive = autoBreakthroughActive
+    TweenService:Create(BreakSwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoBreakthroughActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(BreakSwitchCircle, TweenInfo.new(0.2), {Position = autoBreakthroughActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    if not autoBreakthroughActive then
+        RealmStatusLabel.Text = "Status: Auto Breakthrough Nonaktif"
+    end
+    saveConfig()
+end)
+
+OrbToggleTrigger.Activated:Connect(function()
+    autoQiOrbActive = not autoQiOrbActive
+    Config.autoQiOrbActive = autoQiOrbActive
+    TweenService:Create(OrbSwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoQiOrbActive and Color3.fromRGB(60, 180, 80) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(OrbSwitchCircle, TweenInfo.new(0.2), {Position = autoQiOrbActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+KillToggleTrigger.Activated:Connect(function()
+    autoKillActive = not autoKillActive
+    Config.autoKillActive = autoKillActive
+    TweenService:Create(KillSwitchBg, TweenInfo.new(0.2), {BackgroundColor3 = autoKillActive and Color3.fromRGB(210, 50, 70) or Color3.fromRGB(60, 50, 65)}):Play()
+    TweenService:Create(KillSwitchCircle, TweenInfo.new(0.2), {Position = autoKillActive and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    saveConfig()
+end)
+
+-- Slider Speed Logic
+local function updateSpeed(val)
+    FLY_SPEED = math.clamp(math.round(val), MIN_SPEED, MAX_SPEED)
+    Config.flySpeed = FLY_SPEED
+    SpeedInputBox.Text = tostring(FLY_SPEED)
+    local scale = (FLY_SPEED - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)
+    SliderFill.Size = UDim2.new(scale, 0, 1, 0)
+    saveConfig()
+end
+
+local draggingSlider = false
+SliderButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local inputPosX = input.Position.X
+        local barAbsolutePos = SliderBar.AbsolutePosition.X
+        local barAbsoluteSize = SliderBar.AbsoluteSize.X
+        local percentage = math.clamp((inputPosX - barAbsolutePos) / barAbsoluteSize, 0, 1)
+        local newSpeed = MIN_SPEED + (percentage * (MAX_SPEED - MIN_SPEED))
+        updateSpeed(newSpeed)
+    end
+end)
+
+SpeedInputBox.FocusLost:Connect(function()
+    local num = tonumber(SpeedInputBox.Text)
+    if num then
+        updateSpeed(num)
+    else
+        SpeedInputBox.Text = tostring(FLY_SPEED)
+    end
+end)
+
+-------------------------------------------------------------------------
+-- SMOOTH SILENT CLICK & CHAT FOCUS PROTECTION
+-------------------------------------------------------------------------
+local function trimText(str)
+    return (str or ""):match("^%s*(.-)%s*$"):lower()
+end
+
+local function isUserTypingOrInMenu()
+    if UserInputService:GetFocusedTextBox() ~= nil then
+        return true
+    end
+    if GuiService.MenuIsOpen then
+        return true
+    end
+    return false
+end
+
+local function isActuallyVisible(guiObj)
+    if not guiObj or not guiObj:IsA("GuiObject") then return false end
+    if guiObj.AbsoluteSize.X <= 2 or guiObj.AbsoluteSize.Y <= 2 then return false end
+    local curr = guiObj
+    while curr and curr ~= LocalPlayer.PlayerGui do
+        if curr:IsA("GuiObject") and not curr.Visible then
+            return false
+        elseif curr:IsA("ScreenGui") and not curr.Enabled then
+            return false
+        end
+        curr = curr.Parent
+    end
+    return true
+end
+
+local function triggerGuiClick(element, instantRelease, allowVirtualMouseFallback)
+    if not element then return end
+    
+    local btn = element:IsA("GuiButton") and element
+        or element:FindFirstAncestorWhichIsA("GuiButton")
+        or element:FindFirstChildWhichIsA("GuiButton", true)
+        or element
+
+    local signalFired = false
+
+    pcall(function()
+        if firesignal and btn:IsA("GuiButton") then
+            firesignal(btn.Activated)
+            firesignal(btn.MouseButton1Click)
+            firesignal(btn.MouseButton1Down)
+            firesignal(btn.MouseButton1Up)
+            if isMobile then firesignal(btn.TouchTap) end
+            signalFired = true
+        end
+    end)
+
+    pcall(function()
+        if getconnections and btn:IsA("GuiButton") then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click, btn.MouseButton1Down, btn.MouseButton1Up}) do
+                for _, conn in pairs(getconnections(sig)) do
+                    conn:Fire()
+                    signalFired = true
+                end
+            end
+        end
+    end)
+
+    if (not signalFired or allowVirtualMouseFallback) and not isUserTypingOrInMenu() and isActuallyVisible(btn) then
+        pcall(function()
+            local inset = GuiService:GetGuiInset()
+            local pos = btn.AbsolutePosition
+            local size = btn.AbsoluteSize
+            local centerX = pos.X + (size.X / 2)
+            local centerY = pos.Y + (size.Y / 2) + inset.Y
+
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
+            if not instantRelease then task.wait(0.01) end
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
+        end)
+    end
+end
+
+local function triggerKeyPress(charStr)
+    if isUserTypingOrInMenu() then return end
+    local upperChar = charStr:upper():match("^[A-Z]$")
+    if not upperChar then return end
+    local keyCode = Enum.KeyCode[upperChar]
+    if not keyCode then return end
+
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+        task.wait(0.01)
+        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+    end)
+end
+
+-------------------------------------------------------------------------
+-- SMART ZONE DETECTOR & PRECISION BUFF TELEPORT (QI ZONE & BODY ZONE)
+-------------------------------------------------------------------------
+-- Mencari titik tengah presisi di dalam radius buff Zone
+local function getZoneBuffCenterPosition(zoneName)
+    local targetLower = zoneName:lower()
+    local matchedObjects = {}
+
+    -- 1. Pindai seluruh objek, BillboardGui/TextLabel, dan Atribut di Workspace
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        local isMatch = false
+
+        if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Folder") then
+            if obj.Name:lower():find(targetLower, 1, true) then
+                isMatch = true
+            end
+        elseif (obj:IsA("TextLabel") or obj:IsA("TextBox")) and obj.Text:lower():find(targetLower, 1, true) then
+            local ancestor = obj:FindFirstAncestorOfClass("Model") or obj:FindFirstAncestorWhichIsA("BasePart")
+            if ancestor then
+                table.insert(matchedObjects, ancestor)
+            end
+        elseif obj:IsA("StringValue") and obj.Value:lower():find(targetLower, 1, true) then
+            if obj.Parent then
+                table.insert(matchedObjects, obj.Parent)
+            end
+        end
+
+        if not isMatch and (obj:IsA("Model") or obj:IsA("BasePart")) then
+            pcall(function()
+                for _, attrVal in pairs(obj:GetAttributes()) do
+                    if tostring(attrVal):lower():find(targetLower, 1, true) then
+                        isMatch = true
+                        break
+                    end
+                end
+            end)
+        end
+
+        if isMatch then
+            table.insert(matchedObjects, obj)
+        end
+    end
+
+    if #matchedObjects == 0 then
+        return nil
+    end
+
+    -- 2. Cari bagian lantai / hitbox / area tengah buff dari objek zona yang ditemukan
+    local bestPart = nil
+    local bestPriority = -1
+    local largestArea = 0
+
+    for _, matchObj in ipairs(matchedObjects) do
+        local partsList = {}
+        if matchObj:IsA("BasePart") then
+            table.insert(partsList, matchObj)
+        else
+            for _, d in pairs(matchObj:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    table.insert(partsList, d)
+                end
+            end
+        end
+
+        for _, p in ipairs(partsList) do
+            local pName = p.Name:lower()
+            local priority = 1
+            if pName:find("zone") or pName:find("buff") or pName:find("area") or pName:find("hitbox") or pName:find("center") or pName:find("floor") or pName:find("pad") or pName:find("circle") then
+                priority = 3
+            elseif not pName:find("sign") and not pName:find("banner") and not pName:find("wall") and not pName:find("roof") and not pName:find("pillar") then
+                priority = 2
+            end
+
+            local horizontalFootprint = p.Size.X * p.Size.Z
+            if priority > bestPriority or (priority == bestPriority and horizontalFootprint > largestArea) then
+                bestPriority = priority
+                largestArea = horizontalFootprint
+                bestPart = p
+            end
+        end
+    end
+
+    local rawCenterPos = nil
+    if bestPart then
+        rawCenterPos = bestPart.Position
+    elseif matchedObjects[1]:IsA("Model") then
+        local cf, _ = matchedObjects[1]:GetBoundingBox()
+        rawCenterPos = cf.Position
+    end
+
+    if not rawCenterPos then
+        return nil
+    end
+
+    -- 3. Raycast ke lantai tepat di titik tengah zona agar karakter berdiri pas di dalam jangkauan buff (bukan melayang di atas papan nama)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+
+    local rayOrigin = Vector3.new(rawCenterPos.X, rawCenterPos.Y + 45, rawCenterPos.Z)
+    local rayDirection = Vector3.new(0, -150, 0)
+    local rayResult = Workspace:Raycast(rayOrigin, rayDirection, rayParams)
+
+    if rayResult then
+        return rayResult.Position + Vector3.new(0, 3.2, 0)
+    else
+        return rawCenterPos + Vector3.new(0, 3.2, 0)
+    end
+end
+
+local isTeleportingZone = false
+local function teleportToZoneBuffRange(zoneName)
+    if isTeleportingZone then return end
+    isTeleportingZone = true
+
+    Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+
+    if not HumanoidRootPart then
+        ZoneStatusLabel.Text = "Status: Karakter belum siap!"
+        isTeleportingZone = false
+        return
+    end
+
+    ZoneStatusLabel.Text = "Mencari koordinat buff zone: " .. zoneName .. "..."
+    local targetPos = getZoneBuffCenterPosition(zoneName)
+
+    if not targetPos then
+        ZoneStatusLabel.Text = "Zona '" .. zoneName .. "' belum ter-render. Mendekati area..."
+        isTeleportingZone = false
+        return
+    end
+
+    local dist = (HumanoidRootPart.Position - targetPos).Magnitude
+    ZoneStatusLabel.Text = string.format("Berpindah ke %s (Jarak: %d studs)...", zoneName, math.round(dist))
+
+    -- Jika jarak dekat (< 250 studs) atau instan, gunakan Tween + CFrame presisi tepat di tengah buff
+    local duration = math.clamp(dist / math.max(FLY_SPEED, 120), 0.15, 4.5)
+    local bodyVel = Instance.new("BodyVelocity")
+    bodyVel.Velocity = Vector3.new(0, 0, 0)
+    bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    bodyVel.Parent = HumanoidRootPart
+
+    local tween = TweenService:Create(
+        HumanoidRootPart,
+        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+        {CFrame = CFrame.new(targetPos)}
+    )
+    tween:Play()
+    tween.Completed:Wait()
+
+    -- Pastikan posisi akhir terkunci tepat di titik tengah lantai buff
+    HumanoidRootPart.CFrame = CFrame.new(targetPos)
+    HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
+    bodyVel:Destroy()
+
+    ZoneStatusLabel.Text = "Berhasil berada di dalam jangkauan buff: " .. zoneName .. "!"
+    isTeleportingZone = false
+end
+
+QiTeleportBox.Activated:Connect(function()
+    task.spawn(function()
+        teleportToZoneBuffRange(selectedQiZone)
+    end)
+end)
+
+BodyTeleportBox.Activated:Connect(function()
+    task.spawn(function()
+        teleportToZoneBuffRange(selectedBodyZone)
+    end)
+end)
+
+-------------------------------------------------------------------------
+-- AUTO REALM (KEY M) & AUTO BODY (KEY P) LOGIC
+-------------------------------------------------------------------------
+-- Memeriksa apakah karakter sedang aktif meditasi Qi atau melatih tubuh
+local function isCurrentlyCultivating(modeType)
+    local char = LocalPlayer.Character
+    if not char then return false end
+
+    -- 1. Cek Atribut pada Character atau LocalPlayer jika ada
+    local attrCheck = false
+    pcall(function()
+        for k, v in pairs(char:GetAttributes()) do
+            local kLow = tostring(k):lower()
+            if modeType == "Realm" and (kLow:find("meditat") or kLow:find("cultivat")) and v == true then
+                attrCheck = true
+            elseif modeType == "Body" and (kLow:find("train") or kLow:find("body") or kLow:find("exercis")) and v == true then
+                attrCheck = true
+            end
+        end
+    end)
+    if attrCheck then return true end
+
+    -- 2. Cek apakah ada indikator teks aktif di layar atau animasi khusus yang sedang berjalan
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    local animator = hum and hum:FindFirstChildWhichIsA("Animator")
+    if animator then
+        for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+            local animName = (track.Name or ""):lower()
+            if modeType == "Realm" and (animName:find("meditat") or animName:find("sit") or animName:find("cultivat") or animName:find("lotus")) then
+                return true
+            elseif modeType == "Body" and (animName:find("train") or animName:find("body") or animName:find("punch") or animName:find("push") or animName:find("squat") or animName:find("exercis")) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+-- Loop terpisah untuk Auto Realm (Key M) & Auto Body (Key P)
+task.spawn(function()
+    while true do
+        if not isUserTypingOrInMenu() and not isTeleportingZone then
+            -- Jangan tekan M/P jika sedang di tengah minigame Breakthrough Trial
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            local inTrial = false
+            if playerGui then
+                for _, obj in pairs(playerGui:GetDescendants()) do
+                    if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                        local t = trimText(obj.Text)
+                        if t:find("breakthrough trial", 1, true) or t:find("ring turns gold", 1, true) then
+                            inTrial = true
+                            break
+                        end
+                    end
+                end
+            end
+
+            if not inTrial then
+                -- Eksekusi Auto Realm (Meditasi - Key M)
+                if autoRealmActive and not isCurrentlyCultivating("Realm") then
+                    triggerKeyPress("M")
+                    task.wait(1.8)
+                end
+
+                -- Eksekusi Auto Body (Melatih Tubuh - Key P)
+                if autoBodyActive and not isCurrentlyCultivating("Body") then
+                    triggerKeyPress("P")
+                    task.wait(1.8)
+                end
+            end
+        end
+        task.wait(1.2)
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 1. FARMING LOGIC (HERBS - PRIORITAS LEVEL TERTINGGI 1000YR -> 1YR)
+-------------------------------------------------------------------------
+local function cleanBlacklist()
+    local currentTime = tick()
+    for obj, timeAdded in pairs(harvestedBlacklist) do
+        if currentTime - timeAdded > BLACKLIST_DURATION then
+            harvestedBlacklist[obj] = nil
+        end
+    end
+end
+
+local function getValidPrompt(object)
+    local prompt = object:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled and prompt.Parent then
+        return prompt
+    end
+    if object.Parent then
+        local parentPrompt = object.Parent:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if parentPrompt and parentPrompt.Enabled then
+            return parentPrompt
+        end
+    end
+    return nil
+end
+
+local function getHerbLevelScore(obj, prompt)
+    local score = 1
+    local textsToInspect = {obj.Name}
+
+    if obj.Parent and obj.Parent ~= Workspace then
+        table.insert(textsToInspect, obj.Parent.Name)
+    end
+    if prompt then
+        table.insert(textsToInspect, prompt.ObjectText or "")
+        table.insert(textsToInspect, prompt.ActionText or "")
+    end
+
+    pcall(function()
+        for k, v in pairs(obj:GetAttributes()) do
+            table.insert(textsToInspect, tostring(k) .. " " .. tostring(v))
+        end
+    end)
+
+    for _, desc in pairs(obj:GetDescendants()) do
+        if desc:IsA("TextLabel") then
+            table.insert(textsToInspect, desc.Text)
+        end
+    end
+
+    local combined = table.concat(textsToInspect, " "):lower()
+    for _, yrData in ipairs(HERB_YEAR_PRIORITY) do
+        if combined:find(yrData.pattern, 1, true) then
+            score = math.max(score, yrData.score)
+            break
+        end
+    end
+    return score
+end
+
+local function getBestAndClosestHerb()
+    cleanBlacklist()
+    local bestHerb = nil
+    local highestScore = -1
+    local shortestDistance = math.huge
+    
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if not harvestedBlacklist[obj] and (obj:IsA("BasePart") or obj:IsA("Model")) then
+            if obj.Name:lower():find(selectedHerb:lower()) then
+                local partToTarget = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
+                
+                if partToTarget then
+                    local prompt = getValidPrompt(obj)
+                    
+                    if prompt then
+                        local levelScore = getHerbLevelScore(obj, prompt)
+                        local distance = (HumanoidRootPart.Position - partToTarget.Position).Magnitude
+                        
+                        if (levelScore > highestScore) or (levelScore == highestScore and distance < shortestDistance) then
+                            highestScore = levelScore
+                            shortestDistance = distance
+                            bestHerb = {
+                                Object = obj,
+                                Part = partToTarget,
+                                Prompt = prompt,
+                                Score = levelScore
+                            }
+                        end
+                    else
+                        harvestedBlacklist[obj] = tick()
+                    end
+                end
+            end
+        end
+    end
+    return bestHerb
+end
+
+local function flyToTarget(targetPart)
+    local distance = (HumanoidRootPart.Position - targetPart.Position).Magnitude
+    local duration = distance / FLY_SPEED
+    
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+    local goal = {CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)}
+    local tween = TweenService:Create(HumanoidRootPart, tweenInfo, goal)
+    
+    local bodyVelocity = Instance.new("BodyVelocity")
+    bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    bodyVelocity.Parent = HumanoidRootPart
+    
+    tween:Play()
+    
+    local completed = false
+    local connection
+    connection = tween.Completed:Connect(function()
+        completed = true
+    end)
+    
+    while not completed and autoFarmActive do
+        task.wait(0.08)
+    end
+    
+    if not autoFarmActive then
+        tween:Cancel()
+    end
+    
+    if connection then connection:Disconnect() end
+    bodyVelocity:Destroy()
+end
+
+local function collectHerb(herbData)
+    if herbData.Prompt and herbData.Prompt.Enabled then
+        if fireproximityprompt then
+            fireproximityprompt(herbData.Prompt)
+        else
+            herbData.Prompt:InputHoldBegin()
+            task.wait(herbData.Prompt.HoldDuration or 0.5)
+            herbData.Prompt:InputHoldEnd()
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        if autoFarmActive then
+            Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+            
+            if HumanoidRootPart then
+                local targetData = getBestAndClosestHerb()
+                
+                if targetData and autoFarmActive then
+                    if targetData.Prompt and targetData.Prompt.Enabled then
+                        flyToTarget(targetData.Part)
+                        
+                        if autoFarmActive then
+                            collectHerb(targetData)
+                            harvestedBlacklist[targetData.Object] = tick()
+                            task.wait(WAITING_TIME_AT_HERB)
+                        end
+                    else
+                        harvestedBlacklist[targetData.Object] = tick()
+                    end
+                else
+                    task.wait(1.2)
+                end
+            else
+                task.wait(1)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 2. AUTOCREATE PILLS (ANYWHERE + BACKGROUND UI + INSTANT CLAIM)
+-------------------------------------------------------------------------
+local function findElementByText(exactOrPartialText, exactMatch, allowHidden)
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+    
+    local targetLower = trimText(exactOrPartialText)
+    for _, obj in pairs(playerGui:GetDescendants()) do
+        if obj ~= ScreenGui and not obj:IsDescendantOf(ScreenGui) then
+            if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and (allowHidden or isActuallyVisible(obj)) then
+                local textLower = trimText(obj.Text)
+                if (exactMatch and textLower == targetLower) or (not exactMatch and textLower:find(targetLower, 1, true)) then
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function ensureCauldronSessionActive()
+    local brewObj = findElementByText("brew", true, true)
+    local stokeObj = findElementByText("stoke", true, true)
+    local claimObj = findElementByText("claim", true, true)
+
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if playerGui then
+        for _, desc in pairs(playerGui:GetDescendants()) do
+            if not desc:IsDescendantOf(ScreenGui) then
+                local n = desc.Name:lower()
+                if n:find("cauldron") or n:find("alchemy") then
+                    if desc:IsA("ScreenGui") and not desc.Enabled then
+                        desc.Enabled = true
+                    elseif desc:IsA("GuiObject") and not desc.Visible then
+                        desc.Visible = true
+                    end
+                end
+            end
+        end
+    end
+
+    if brewObj or stokeObj or claimObj then
+        return true
+    end
+
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local objText = (obj.ObjectText .. " " .. obj.ActionText .. " " .. obj.Parent.Name):lower()
+            if objText:find("cauldron") or objText:find("brew") or objText:find("alchemy") then
+                pcall(function()
+                    if fireproximityprompt then
+                        fireproximityprompt(obj)
+                    end
+                end)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function attemptInstantClaimPill()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if playerGui then
+        for _, obj in pairs(playerGui:GetDescendants()) do
+            if not obj:IsDescendantOf(ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
+                local t = trimText(obj.Text)
+                if t == "claim" or t == "collect" or t:find("skip") or t:find("instant") then
+                    triggerGuiClick(obj, true, false)
+                end
+            end
+        end
+    end
+
+    pcall(function()
+        for _, rem in pairs(ReplicatedStorage:GetDescendants()) do
+            if rem:IsA("RemoteEvent") then
+                local rn = rem.Name:lower()
+                if rn:find("claim") or (rn:find("cauldron") and not rn:find("open")) or rn:find("collectpill") or rn:find("finishbrew") then
+                    rem:FireServer()
+                    rem:FireServer("Claim")
+                end
+            end
+        end
+    end)
+end
+
+local function selectBestHerbFromModal(herbName)
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return false end
+    
+    local herbLower = trimText(herbName)
+    local candidates = {}
+    
+    for _, obj in pairs(playerGui:GetDescendants()) do
+        if not obj:IsDescendantOf(ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then
+            if trimText(obj.Text) == herbLower then
+                local row = obj.Parent
+                for _ = 1, 3 do
+                    if row then
+                        local chooseBtn = nil
+                        local yearScore = 0
+                        local quantity = 1
+                        
+                        for _, child in pairs(row:GetDescendants()) do
+                            if (child:IsA("TextLabel") or child:IsA("TextButton")) then
+                                local txt = trimText(child.Text)
+                                if txt == "choose" then
+                                    chooseBtn = child
+                                elseif txt:find("year") then
+                                    for _, yrData in ipairs(HERB_YEAR_PRIORITY) do
+                                        if txt:find(yrData.pattern, 1, true) then
+                                            yearScore = math.max(yearScore, yrData.score)
+                                            break
+                                        end
+                                    end
+                                elseif txt:match("^x%d+") then
+                                    local num = tonumber(txt:match("%d+"))
+                                    if num then quantity = num end
+                                end
+                            end
+                        end
+                        
+                        if chooseBtn and quantity > 0 then
+                            table.insert(candidates, {
+                                Row = row,
+                                ChooseButton = chooseBtn,
+                                Score = yearScore,
+                                Quantity = quantity
+                            })
+                            break
+                        end
+                        row = row.Parent
+                    end
+                end
+            end
+        end
+    end
+    
+    if #candidates == 0 then return false end
+    
+    table.sort(candidates, function(a, b)
+        return a.Score > b.Score
+    end)
+    
+    local bestCandidate = candidates[1]
+    triggerGuiClick(bestCandidate.ChooseButton, false, false)
+    return true
+end
+
+local function handleStokeMinigame(stokeBtnObj)
+    local modalContainer = stokeBtnObj.Parent
+    while modalContainer and modalContainer ~= LocalPlayer.PlayerGui and modalContainer.AbsoluteSize.Y < 130 do
+        modalContainer = modalContainer.Parent
+    end
+    if not modalContainer then return end
+
+    local stokeY = stokeBtnObj.AbsolutePosition.Y
+    local initialX = {}
+
+    for _, obj in pairs(modalContainer:GetDescendants()) do
+        if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj.AbsolutePosition.Y < stokeY then
+            if obj.AbsoluteSize.X < 180 and obj.AbsoluteSize.Y <= 60 then
+                initialX[obj] = obj.AbsolutePosition.X
+            end
+        end
+    end
+
+    RunService.RenderStepped:Wait()
+    RunService.RenderStepped:Wait()
+    RunService.RenderStepped:Wait()
+
+    local cursorObj = nil
+    local maxDelta = 0
+    for obj, oldX in pairs(initialX) do
+        if obj and obj.Parent then
+            local dX = math.abs(obj.AbsolutePosition.X - oldX)
+            if dX > 0.4 and dX > maxDelta then
+                maxDelta = dX
+                cursorObj = obj
+            end
+        end
+    end
+
+    local targetZoneObj = nil
+    local barTrackObj = nil
+    local refY = cursorObj and (cursorObj.AbsolutePosition.Y + cursorObj.AbsoluteSize.Y / 2) or (stokeY - 45)
+
+    for _, obj in pairs(modalContainer:GetDescendants()) do
+        if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj ~= cursorObj and (not cursorObj or not obj:IsDescendantOf(cursorObj)) then
+            local centerY = obj.AbsolutePosition.Y + (obj.AbsoluteSize.Y / 2)
+            if math.abs(centerY - refY) < 35 then
+                if obj.AbsoluteSize.X >= 180 and obj.AbsoluteSize.Y <= 50 then
+                    if not barTrackObj or obj.AbsoluteSize.X > barTrackObj.AbsoluteSize.X then
+                        barTrackObj = obj
+                    end
+                elseif obj.AbsoluteSize.X >= 6 and obj.AbsoluteSize.X <= 90 and obj.AbsoluteSize.Y <= 45 then
+                    local dX = initialX[obj] and math.abs(obj.AbsolutePosition.X - initialX[obj]) or 0
+                    if dX < 0.2 then
+                        if not targetZoneObj or obj.AbsoluteSize.X < targetZoneObj.AbsoluteSize.X then
+                            targetZoneObj = obj
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local startTime = tick()
+    local prevX = cursorObj and (cursorObj.AbsolutePosition.X + cursorObj.AbsoluteSize.X / 2) or nil
+
+    while autoPillActive and isActuallyVisible(stokeBtnObj) and (tick() - startTime < 4.0) do
+        if cursorObj then
+            local curCenter = cursorObj.AbsolutePosition.X + (cursorObj.AbsoluteSize.X / 2)
+            local velX = prevX and (curCenter - prevX) or 0
+            prevX = curCenter
+            local predictedX = curCenter + (velX * 1.15)
+
+            local zMin, zMax
+            if targetZoneObj then
+                local zPos = targetZoneObj.AbsolutePosition.X
+                local zSize = targetZoneObj.AbsoluteSize.X
+                local pad = math.min(zSize * 0.2, 6)
+                zMin = zPos + pad
+                zMax = (zPos + zSize) - pad
+            elseif barTrackObj then
+                local bPos = barTrackObj.AbsolutePosition.X
+                local bSize = barTrackObj.AbsoluteSize.X
+                zMin = bPos + (bSize * 0.46)
+                zMax = bPos + (bSize * 0.54)
+            end
+
+            if zMin and zMax then
+                if (predictedX >= zMin and predictedX <= zMax) or (curCenter >= zMin and curCenter <= zMax) then
+                    triggerGuiClick(stokeBtnObj, true, false)
+                    break
+                end
+            end
+        end
+        RunService.RenderStepped:Wait()
+    end
+
+    task.spawn(function()
+        for _ = 1, 6 do
+            if not autoPillActive then break end
+            attemptInstantClaimPill()
+            task.wait(0.15)
+        end
+    end)
+end
+
+task.spawn(function()
+    while true do
+        if autoPillActive and not isUserTypingOrInMenu() then
+            ensureCauldronSessionActive()
+
+            local claimObj = findElementByText("claim", true, false)
+            if claimObj then
+                triggerGuiClick(claimObj, true, false)
+                task.wait(0.25)
+            else
+                local stokeObj = findElementByText("stoke", true, false)
+                if stokeObj then
+                    handleStokeMinigame(stokeObj)
+                    attemptInstantClaimPill()
+                    task.wait(0.2)
+                else
+                    attemptInstantClaimPill()
+
+                    local addHerbObj = findElementByText("add herb", true, true)
+                    local brewObj = findElementByText("brew", true, true)
+                    
+                    if brewObj then
+                        local backObj = findElementByText("back", true, false)
+                        if backObj then
+                            triggerGuiClick(backObj, false, false)
+                            task.wait(0.25)
+                        end
+                        
+                        local recipe = PILL_RECIPES[selectedPill]
+                        if recipe and addHerbObj then
+                            for slotIdx = 1, 3 do
+                                if not autoPillActive or isUserTypingOrInMenu() then break end
+                                
+                                local currentAddHerb = findElementByText("add herb", true, true)
+                                if currentAddHerb then
+                                    triggerGuiClick(currentAddHerb, false, false)
+                                    task.wait(0.32)
+                                    
+                                    local targetHerbName = recipe[slotIdx]
+                                    local chosen = selectBestHerbFromModal(targetHerbName)
+                                    task.wait(0.32)
+                                    
+                                    if not chosen then
+                                        local backBtn = findElementByText("back", true, true)
+                                        if backBtn then triggerGuiClick(backBtn, false, false) end
+                                        break
+                                    end
+                                end
+                            end
+                            
+                            task.wait(0.15)
+                            local finalBrewObj = findElementByText("brew", true, true)
+                            if finalBrewObj and not findElementByText("add herb", true, false) then
+                                triggerGuiClick(finalBrewObj, false, false)
+                                task.wait(0.4)
+                            end
+                        elseif not addHerbObj then
+                            triggerGuiClick(brewObj, false, false)
+                            task.wait(0.4)
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.15)
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 3. AUTO BREAKTHROUGH (ISOLATED SHRINKING RING TRACKER UNTUK REALM 18+)
+-------------------------------------------------------------------------
+local function isGoldColor(col)
+    return (col.R > 0.75 and col.G > 0.55 and col.B < 0.42)
+end
+
+local function getCultivationHudState()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+
+    local state = {
+        realmName = nil,
+        currentLayer = nil,
+        maxLayers = 10,
+        isMaxLayerInRealm = false,
+        qiPercent = nil,
+        trialReadyBanner = false,
+        trialMinigameActive = false,
+        breakthroughBtn = nil
+    }
+
+    for _, obj in pairs(playerGui:GetDescendants()) do
+        if obj ~= ScreenGui and not obj:IsDescendantOf(ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+            local rawText = obj.Text or ""
+            local cleanLower = trimText(rawText)
+
+            if cleanLower:find("breakthrough trial", 1, true) or cleanLower:find("ring turns gold", 1, true) then
+                state.trialMinigameActive = true
+            end
+
+            if cleanLower:find("realm trial ready", 1, true) then
+                state.trialReadyBanner = true
+            end
+
+            if cleanLower == "breakthrough" then
+                state.breakthroughBtn = obj
+            end
+
+            local pctMatch = rawText:match("^%s*(%d+)%%%s*$")
+            if pctMatch then
+                state.qiPercent = tonumber(pctMatch)
+            end
+
+            if rawText:find("Qi") and (rawText:find("·") or rawText:find("-")) then
+                local afterPrefix = rawText:match("Qi%s*[·%-]%s*(.+)$")
+                if afterPrefix then
+                    local realmPart, romanPart = afterPrefix:match("^(.+)%s+([IVX]+)%s*$")
+                    if realmPart and romanPart and ROMAN_TO_NUMBER[romanPart] then
+                        local rLower = trimText(realmPart)
+                        state.realmName = realmPart
+                        state.currentLayer = ROMAN_TO_NUMBER[romanPart]
+                        state.maxLayers = REALM_MAX_LAYERS[rLower] or 10
+                        state.isMaxLayerInRealm = (state.currentLayer >= state.maxLayers)
+                    end
+                end
+            end
+        end
+    end
+
+    return state
+end
+
+local function countSingleLetterLabels(container)
+    local count = 0
+    for _, d in pairs(container:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and isActuallyVisible(d) then
+            if d.Text:match("^%s*[A-Z]%s*$") then
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
+local function getIsolatedCircleContainer(letterObj)
+    local curr = letterObj.Parent
+    if not curr or not curr:IsA("GuiObject") then return letterObj end
+
+    if curr.Parent and curr.Parent:IsA("GuiObject") and curr.Parent.AbsoluteSize.X <= 260 then
+        if countSingleLetterLabels(curr.Parent) <= 1 then
+            curr = curr.Parent
+        end
+    end
+    return curr
+end
+
+local trialNodesData = {}
+
+task.spawn(function()
+    while true do
+        if autoBreakthroughActive then
+            local hud = getCultivationHudState()
+
+            if hud then
+                if hud.trialMinigameActive then
+                    RealmStatusLabel.Text = "Status: Trial Aktif (Menunggu Cincin Mengecil & Emas)"
+                elseif hud.realmName and hud.currentLayer then
+                    RealmStatusLabel.Text = string.format(
+                        "Status: %s (Layer %d/%d) | Qi: %s%%",
+                        hud.realmName, hud.currentLayer, hud.maxLayers, tostring(hud.qiPercent or 0)
+                    )
+                end
+
+                if hud.trialMinigameActive then
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local camViewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+
+                    if playerGui then
+                        for _, obj in pairs(playerGui:GetDescendants()) do
+                            if obj ~= ScreenGui and not obj:IsDescendantOf(ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                                local posY = obj.AbsolutePosition.Y
+                                local posX = obj.AbsolutePosition.X
+
+                                local inTrialPlayArea = (posY > camViewport.Y * 0.12 and posY < camViewport.Y * 0.74)
+                                    and (posX > camViewport.X * 0.14 and posX < camViewport.X * 0.86)
+
+                                if inTrialPlayArea then
+                                    local cleanChar = obj.Text:match("^%s*([A-Z])%s*$")
+                                    if cleanChar and obj.AbsoluteSize.X >= 16 and obj.AbsoluteSize.X <= 130 then
+                                        local nodeContainer = getIsolatedCircleContainer(obj)
+
+                                        if not trialNodesData[nodeContainer] or trialNodesData[nodeContainer].char ~= cleanChar then
+                                            trialNodesData[nodeContainer] = {
+                                                char = cleanChar,
+                                                spawnTime = tick(),
+                                                maxOuterSize = 0,
+                                                triggered = false
+                                            }
+                                        end
+
+                                        local nData = trialNodesData[nodeContainer]
+                                        local age = tick() - nData.spawnTime
+
+                                        local currentOuterSize = 0
+                                        local innerCircleSize = obj.Parent and obj.Parent.AbsoluteSize.X or obj.AbsoluteSize.X
+
+                                        for _, desc in pairs(nodeContainer:GetDescendants()) do
+                                            if desc:IsA("GuiObject") and desc ~= obj and isActuallyVisible(desc) then
+                                                local sz = desc.AbsoluteSize.X
+                                                if sz >= 30 and sz < innerCircleSize then
+                                                    innerCircleSize = sz
+                                                end
+                                                if sz > currentOuterSize then
+                                                    currentOuterSize = sz
+                                                end
+                                            end
+                                        end
+
+                                        if currentOuterSize > nData.maxOuterSize then
+                                            nData.maxOuterSize = currentOuterSize
+                                        end
+
+                                        if not nData.triggered and age >= 0.22 then
+                                            local hasShrunk = false
+                                            local isRingGoldNow = false
+
+                                            if nData.maxOuterSize > 0 and currentOuterSize < (nData.maxOuterSize * 0.82) then
+                                                hasShrunk = true
+                                            end
+
+                                            for _, desc in pairs(nodeContainer:GetDescendants()) do
+                                                if not desc:IsDescendantOf(obj) and desc ~= obj then
+                                                    if desc:IsA("UIStroke") and isGoldColor(desc.Color) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    elseif (desc:IsA("ImageLabel") or desc:IsA("ImageButton")) and isActuallyVisible(desc) and isGoldColor(desc.ImageColor3) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    elseif desc:IsA("Frame") and isActuallyVisible(desc) and desc.BackgroundTransparency < 0.85 and isGoldColor(desc.BackgroundColor3) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    end
+                                                end
+                                            end
+
+                                            local inSweetSpotSize = (nData.maxOuterSize > innerCircleSize * 1.15)
+                                                and (currentOuterSize <= innerCircleSize * 1.24)
+                                                and (currentOuterSize >= innerCircleSize * 0.88)
+
+                                            if (isRingGoldNow and (hasShrunk or age >= 0.35)) or inSweetSpotSize then
+                                                nData.triggered = true
+                                                triggerKeyPress(cleanChar)
+                                                triggerGuiClick(obj, true, true)
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    RunService.RenderStepped:Wait()
+                else
+                    table.clear(trialNodesData)
+
+                    local isReadyToBreakthrough = (hud.qiPercent and hud.qiPercent >= 100) or hud.trialReadyBanner
+                    if isReadyToBreakthrough and hud.breakthroughBtn and not isUserTypingOrInMenu() then
+                        triggerGuiClick(hud.breakthroughBtn, false, false)
+                        task.wait(0.7)
+                    else
+                        task.wait(0.25)
+                    end
+                end
+            else
+                task.wait(0.3)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 4. AUTO CLICK BONUS QI ORB (SMOOTH & SILENT)
+-------------------------------------------------------------------------
+local function isInsideExcludedWindow(guiObj)
+    local curr = guiObj
+    while curr and curr ~= LocalPlayer.PlayerGui do
+        local n = curr.Name:lower()
+        if n:find("realm") or n:find("cauldron") or n:find("alchemy") or n:find("quest")
+            or n:find("inventory") or n:find("shop") or n:find("skill") or n:find("setting")
+            or n:find("sect") or n:find("party") or n:find("cultivator") or n:find("pack")
+            or n:find("chat") or n:find("leaderboard") or n:find("hotbar") then
+            return true
+        end
+        curr = curr.Parent
+    end
+    return false
+end
+
+task.spawn(function()
+    while true do
+        if autoQiOrbActive and not isUserTypingOrInMenu() then
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            local camViewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+
+            if playerGui then
+                for _, obj in pairs(playerGui:GetDescendants()) do
+                    if obj ~= ScreenGui and not obj:IsDescendantOf(ScreenGui) and obj:IsA("GuiObject") and isActuallyVisible(obj) then
+                        if not isInsideExcludedWindow(obj) then
+                            local nameLow = obj.Name:lower()
+                            local parentNameLow = obj.Parent and obj.Parent.Name:lower() or ""
+                            local sizeX, sizeY = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
+                            local posX, posY = obj.AbsolutePosition.X, obj.AbsolutePosition.Y
+
+                            local inOrbZone = (posX > camViewport.X * 0.14 and posX < camViewport.X * 0.82)
+                                and (posY > camViewport.Y * 0.10 and posY < camViewport.Y * 0.72)
+                            local isSquareOrbSize = (sizeX >= 36 and sizeX <= 160) and (math.abs(sizeX - sizeY) <= 18)
+
+                            if inOrbZone and isSquareOrbSize then
+                                local isQiOrb = false
+                                if nameLow:find("orb") or nameLow:find("bonus") or nameLow:find("burst") or nameLow:find("yinyang") or parentNameLow:find("orb") then
+                                    isQiOrb = true
+                                elseif (obj:IsA("ImageButton") or obj:IsA("TextButton")) then
+                                    local txt = obj:IsA("TextButton") and trimText(obj.Text) or ""
+                                    if txt == "" then
+                                        isQiOrb = true
+                                    end
+                                end
+
+                                if isQiOrb then
+                                    triggerGuiClick(obj, false, false)
+                                    task.wait(0.16)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.12)
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 5. AUTO KILL PLAYER (TARGET LOCK + AUTO SWORD + AUTO SKILLS)
+-------------------------------------------------------------------------
+local function equipAndSwingWeapon(char)
+    if not char then return end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+
+    local equippedTool = char:FindFirstChildWhichIsA("Tool")
+    if not equippedTool and backpack and hum then
+        for _, item in pairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then
+                hum:EquipTool(item)
+                equippedTool = item
+                break
+            end
+        end
+    end
+
+    if equippedTool then
+        pcall(function()
+            equippedTool:Activate()
+        end)
+    end
+
+    if not isUserTypingOrInMenu() then
+        pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
+    end
+end
+
+local lastSkillCycleTime = 0
+local skillIndex = 1
+
+RunService.RenderStepped:Connect(function()
+    if autoKillActive and selectedTargetPlayerName ~= "None" then
+        local targetPlr = Players:FindFirstChild(selectedTargetPlayerName)
+        if targetPlr and targetPlr.Character then
+            local targetRoot = targetPlr.Character:FindFirstChild("HumanoidRootPart")
+            local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+            if targetRoot and myRoot and (not targetHum or targetHum.Health > 0) then
+                local lockPosition = (targetRoot.CFrame * CFrame.new(0, 0, 3.5)).Position
+                myRoot.CFrame = CFrame.new(lockPosition, targetRoot.Position)
+                myRoot.Velocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoKillActive and selectedTargetPlayerName ~= "None" and not isUserTypingOrInMenu() then
+            local targetPlr = Players:FindFirstChild(selectedTargetPlayerName)
+            if targetPlr and targetPlr.Character then
+                local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
+                if not targetHum or targetHum.Health > 0 then
+                    equipAndSwingWeapon(LocalPlayer.Character)
+
+                    if autoSkillKillActive and (tick() - lastSkillCycleTime >= 0.35) then
+                        lastSkillCycleTime = tick()
+                        local keyToPress = COMBAT_SKILL_KEYS[skillIndex]
+                        skillIndex = (skillIndex % #COMBAT_SKILL_KEYS) + 1
+
+                        pcall(function()
+                            VirtualInputManager:SendKeyEvent(true, keyToPress, false, game)
+                            task.wait(0.02)
+                            VirtualInputManager:SendKeyEvent(false, keyToPress, false, game)
+                        end)
+                    end
+                end
+            end
+            task.wait(0.12)
+        else
+            task.wait(0.35)
+        end
+    end
+end)
