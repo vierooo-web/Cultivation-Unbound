@@ -24,9 +24,11 @@ local Config = {
     autoQiOrbActive = false,
     autoRealmActive = false,
     autoBodyActive = false,
+    autoMobActive = false,
     autoKillActive = false,
     selectedHerb = "Ginseng",
     selectedPill = "Qi Cultivation Pill",
+    selectedMob = "Bandit",
     selectedQiZone = "Verdant Valley",
     selectedBodyZone = "Dusty Courtyard",
     flySpeed = 60,
@@ -69,13 +71,16 @@ local State = {
     autoQiOrbActive = Config.autoQiOrbActive,
     autoRealmActive = Config.autoRealmActive,
     autoBodyActive = Config.autoBodyActive,
+    autoMobActive = Config.autoMobActive,
     autoKillActive = Config.autoKillActive,
     autoSkillKillActive = true,
     selectedHerb = Config.selectedHerb,
     selectedPill = Config.selectedPill,
+    selectedMob = Config.selectedMob,
     selectedQiZone = Config.selectedQiZone,
     selectedBodyZone = Config.selectedBodyZone,
     selectedTargetPlayerName = "None",
+    currentMobTarget = nil,
     flySpeed = Config.flySpeed or 60,
     minSpeed = 10,
     maxSpeed = 300,
@@ -91,20 +96,25 @@ local State = {
     trialNodesData = {},
     lastSkillCycleTime = 0,
     skillIndex = 1,
-    -- Pelacak Responsif Auto Realm (M) & Auto Body (P)
     lastQiServerTick = 0,
     lastBodyServerTick = 0,
     lastRealmTrigger = 0,
     lastBodyTrigger = 0,
-    forceImmediateCultivate = false,
-    activeRecipeSlot = 1,
-    isBrewingWaitClaim = false,
-    cauldronOrigCFrame = nil
+    forceImmediateCultivate = false
 }
 
 local Constants = {
     HERBS_LIST = {"Ginseng", "Azure Lotus", "Golden Fern", "Violet Sage", "Verdant Moss"},
     PILLS_LIST = {"Bloodfury Pill", "Body Cultivation Pill", "Qi Cultivation Pill", "Vitality Pill"},
+    MOBS_LIST = {
+        "Bandit",
+        "Bandit Captain",
+        "Outer Disciple",
+        "Inner Disciple",
+        "Core Disciple",
+        "Sect Elder",
+        "World Boss"
+    },
     QI_ZONES_LIST = {
         "Verdant Valley", "Misty Peaks", "Thunder Sanctum",
         "Celestial Expanse", "Shattered Heavens", "Dao Pinnacle", "Shattered Sky"
@@ -113,9 +123,7 @@ local Constants = {
         "Dusty Courtyard", "Iron Fist Dojo", "Stone Peak Arena",
         "Jade Colosseum", "Dragon Spine Ridge", "Heaven's Forge", "Immortal Crucible"
     },
-    -- Koordinat Eksak Hasil Scanner Workspace Cultivation Unbound
     EXACT_ZONE_COORDS = {
-        -- Qi Zones
         ["Verdant Valley"]    = Vector3.new(-190, 5, 120),
         ["Misty Peaks"]       = Vector3.new(-1100, 112, 250),
         ["Thunder Sanctum"]   = Vector3.new(1274, 162, -395),
@@ -123,7 +131,6 @@ local Constants = {
         ["Shattered Heavens"] = Vector3.new(-1520, 182, -650),
         ["Dao Pinnacle"]      = Vector3.new(243, 1002, -785),
         ["Shattered Sky"]     = Vector3.new(-108, 730, -1064),
-        -- Body Zones
         ["Dusty Courtyard"]    = Vector3.new(150, 4, 40),
         ["Iron Fist Dojo"]     = Vector3.new(795, 9, 330),
         ["Stone Peak Arena"]   = Vector3.new(1500, 7, 650),
@@ -164,6 +171,16 @@ local Constants = {
     COMBAT_SKILL_KEYS = {
         Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V,
         Enum.KeyCode.G, Enum.KeyCode.H, Enum.KeyCode.T, Enum.KeyCode.Q
+    },
+    FRIENDLY_NPCS = {
+        ["rowan"] = true, ["pillmerchant"] = true, ["scholarwen"] = true,
+        ["weaponmerchant"] = true, ["kess"] = true, ["garrick"] = true,
+        ["mira"] = true, ["weightmerchant"] = true, ["elder cultivator"] = true,
+        ["skillmerchant"] = true, ["goodsmerchant"] = true, ["manualarchivist"] = true,
+        ["meritquartermaster"] = true, ["lei"] = true, ["skyhermit"] = true,
+        ["trader"] = true, ["racemaster"] = true, ["yao"] = true,
+        ["jun"] = true, ["ku"] = true, ["shen"] = true, ["mei"] = true,
+        ["huang"] = true, ["tutorialelder"] = true
     }
 }
 
@@ -314,48 +331,39 @@ local function isActuallyVisible(guiObj)
     return true
 end
 
--- Klik GUI Bersih (1x Eksekusi Tanpa Spam Ganda)
-local function triggerGuiClick(element, instantRelease, allowPhysicalFallback)
+-- Fungsi Klik UI (Kompatibel untuk Alchemy Cauldron, Qi Orb, & Breakthrough)
+local function clickGuiElement(element, instantRelease, allowVirtualMouseFallback)
     if not element then return end
     local btn = element:IsA("GuiButton") and element
         or element:FindFirstAncestorWhichIsA("GuiButton")
         or element:FindFirstChildWhichIsA("GuiButton", true)
         or element
 
-    local signalHandled = false
+    local signalFired = false
+
+    pcall(function()
+        if firesignal and btn:IsA("GuiButton") then
+            firesignal(btn.Activated)
+            firesignal(btn.MouseButton1Click)
+            firesignal(btn.MouseButton1Down)
+            firesignal(btn.MouseButton1Up)
+            if State.isMobile then firesignal(btn.TouchTap) end
+            signalFired = true
+        end
+    end)
 
     pcall(function()
         if getconnections and btn:IsA("GuiButton") then
-            local c1 = getconnections(btn.MouseButton1Click)
-            if c1 and #c1 > 0 then
-                for _, conn in ipairs(c1) do
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click, btn.MouseButton1Down, btn.MouseButton1Up}) do
+                for _, conn in pairs(getconnections(sig)) do
                     conn:Fire()
-                    signalHandled = true
-                end
-            end
-            if not signalHandled then
-                local c2 = getconnections(btn.Activated)
-                if c2 and #c2 > 0 then
-                    for _, conn in ipairs(c2) do
-                        conn:Fire()
-                        signalHandled = true
-                    end
+                    signalFired = true
                 end
             end
         end
     end)
 
-    if not signalHandled then
-        pcall(function()
-            if firesignal and btn:IsA("GuiButton") then
-                firesignal(btn.MouseButton1Click)
-                signalHandled = true
-            end
-        end)
-    end
-
-    -- Jika executor tidak mengeksekusi firesignal/getconnections, gunakan 1x klik koordinat tombol
-    if (not signalHandled or allowPhysicalFallback) and not isUserTypingOrInMenu() and isActuallyVisible(btn) then
+    if (not signalFired or allowVirtualMouseFallback) and not isUserTypingOrInMenu() and isActuallyVisible(btn) then
         pcall(function()
             local inset = GuiService:GetGuiInset()
             local pos = btn.AbsolutePosition
@@ -364,7 +372,7 @@ local function triggerGuiClick(element, instantRelease, allowPhysicalFallback)
             local centerY = pos.Y + (size.Y / 2) + inset.Y
 
             VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
-            if not instantRelease then task.wait(0.02) end
+            if not instantRelease then task.wait(0.01) end
             VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
         end)
     end
@@ -498,7 +506,7 @@ do
     local autoPage = Instance.new("ScrollingFrame")
     autoPage.Size = UDim2.new(1, 0, 1, 0)
     autoPage.BackgroundTransparency = 1
-    autoPage.CanvasSize = UDim2.new(0, 0, 0, 840)
+    autoPage.CanvasSize = UDim2.new(0, 0, 0, 960)
     autoPage.ScrollBarThickness = 5
     autoPage.ScrollingDirection = Enum.ScrollingDirection.Y
     autoPage.Visible = true
@@ -571,6 +579,7 @@ do
         State.autoQiOrbActive = false
         State.autoRealmActive = false
         State.autoBodyActive = false
+        State.autoMobActive = false
         State.autoKillActive = false
         screenGui:Destroy()
     end)
@@ -761,14 +770,14 @@ do
         if num then updateSpeed(num) else speedInputBox.Text = tostring(State.flySpeed) end
     end)
 
-    -- 2. AUTOCREATE PILLS (ZERO-LAG + EXACT 3-COLUMN SLOT + INSTANT CLAIM)
-    addSectionHeader("Auto Create Pills (Zero-Lag + Anywhere + Instant Claim)", 180)
+    -- 2. AUTOCREATE PILLS (KODE LAMA + BUKA CAULDRON DI MANA SAJA)
+    addSectionHeader("Auto Create Pills (Anywhere Cauldron)", 180)
 
     local pillDropContainer = Instance.new("Frame")
     pillDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
     pillDropContainer.Position = UDim2.new(0, 0, 0, 205)
     pillDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
-    pillDropContainer.ZIndex = 4
+    pillDropContainer.ZIndex = 5
     pillDropContainer.Parent = page
     addCorner(pillDropContainer, 6)
 
@@ -781,7 +790,7 @@ do
     pillDropLabel.TextSize = 12
     pillDropLabel.Font = Enum.Font.Gotham
     pillDropLabel.TextXAlignment = Enum.TextXAlignment.Left
-    pillDropLabel.ZIndex = 4
+    pillDropLabel.ZIndex = 5
     pillDropLabel.Parent = pillDropContainer
 
     local pillDropBtn = Instance.new("TextButton")
@@ -792,7 +801,7 @@ do
     pillDropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     pillDropBtn.TextSize = 10
     pillDropBtn.Font = Enum.Font.GothamBold
-    pillDropBtn.ZIndex = 5
+    pillDropBtn.ZIndex = 6
     pillDropBtn.Parent = pillDropContainer
     addCorner(pillDropBtn, 4)
 
@@ -902,12 +911,89 @@ do
         saveConfig()
     end)
 
-    -- 4. AUTO KILL PLAYER
-    addSectionHeader("Auto Kill Player (Target Lock & Skills)", 528, Color3.fromRGB(220, 120, 130))
+    -- 4. AUTOFARM MOB (TELEPORT + AUTO LOCK & KILL)
+    addSectionHeader("Autofarm Mob (Teleport + Auto Lock & Kill)", 528, Color3.fromRGB(240, 180, 90))
+
+    local mobDropContainer = Instance.new("Frame")
+    mobDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+    mobDropContainer.Position = UDim2.new(0, 0, 0, 553)
+    mobDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    mobDropContainer.ZIndex = 4
+    mobDropContainer.Parent = page
+    addCorner(mobDropContainer, 6)
+
+    local mobDropLabel = Instance.new("TextLabel")
+    mobDropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+    mobDropLabel.Position = UDim2.new(0, 10, 0, 0)
+    mobDropLabel.BackgroundTransparency = 1
+    mobDropLabel.Text = "Select Mob"
+    mobDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    mobDropLabel.TextSize = 12
+    mobDropLabel.Font = Enum.Font.Gotham
+    mobDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+    mobDropLabel.ZIndex = 4
+    mobDropLabel.Parent = mobDropContainer
+
+    local mobDropBtn = Instance.new("TextButton")
+    mobDropBtn.Size = UDim2.new(0.52, 0, 0.72, 0)
+    mobDropBtn.Position = UDim2.new(0.45, 0, 0.14, 0)
+    mobDropBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+    mobDropBtn.Text = State.selectedMob .. " ▾"
+    mobDropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    mobDropBtn.TextSize = 10
+    mobDropBtn.Font = Enum.Font.GothamBold
+    mobDropBtn.ZIndex = 5
+    mobDropBtn.Parent = mobDropContainer
+    addCorner(mobDropBtn, 4)
+
+    local mobDropList = Instance.new("ScrollingFrame")
+    mobDropList.Size = UDim2.new(1, 0, 0, 130)
+    mobDropList.Position = UDim2.new(0, 0, 1, 4)
+    mobDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+    mobDropList.Visible = false
+    mobDropList.ZIndex = 26
+    mobDropList.CanvasSize = UDim2.new(0, 0, 0, #Constants.MOBS_LIST * 28)
+    mobDropList.ScrollBarThickness = 4
+    mobDropList.Parent = mobDropBtn
+    addCorner(mobDropList, 4)
+
+    for i, mobName in ipairs(Constants.MOBS_LIST) do
+        local mBtn = Instance.new("TextButton")
+        mBtn.Size = UDim2.new(1, -5, 0, 26)
+        mBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 28)
+        mBtn.BackgroundTransparency = 1
+        mBtn.Text = mobName
+        mBtn.TextColor3 = Color3.fromRGB(235, 225, 200)
+        mBtn.TextSize = 10
+        mBtn.Font = Enum.Font.Gotham
+        mBtn.ZIndex = 27
+        mBtn.Parent = mobDropList
+
+        mBtn.Activated:Connect(function()
+            State.selectedMob = mobName
+            Config.selectedMob = mobName
+            State.currentMobTarget = nil
+            mobDropBtn.Text = mobName .. " ▾"
+            mobDropList.Visible = false
+            saveConfig()
+        end)
+    end
+
+    createToggleRow(page, 598, "Autofarm Mob (Teleport & Lock)", State.autoMobActive, Color3.fromRGB(230, 150, 50), function(val)
+        State.autoMobActive = val
+        Config.autoMobActive = val
+        if not val then
+            State.currentMobTarget = nil
+        end
+        saveConfig()
+    end)
+
+    -- 5. AUTO KILL PLAYER
+    addSectionHeader("Auto Kill Player (Target Lock & Skills)", 648, Color3.fromRGB(220, 120, 130))
 
     local playerDropContainer = Instance.new("Frame")
     playerDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
-    playerDropContainer.Position = UDim2.new(0, 0, 0, 553)
+    playerDropContainer.Position = UDim2.new(0, 0, 0, 673)
     playerDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
     playerDropContainer.ZIndex = 3
     playerDropContainer.Parent = page
@@ -990,11 +1076,19 @@ do
     herbDropBtn.Activated:Connect(function()
         herbDropList.Visible = not herbDropList.Visible
         pillDropList.Visible = false
+        mobDropList.Visible = false
         playerDropList.Visible = false
     end)
     pillDropBtn.Activated:Connect(function()
         pillDropList.Visible = not pillDropList.Visible
         herbDropList.Visible = false
+        mobDropList.Visible = false
+        playerDropList.Visible = false
+    end)
+    mobDropBtn.Activated:Connect(function()
+        mobDropList.Visible = not mobDropList.Visible
+        herbDropList.Visible = false
+        pillDropList.Visible = false
         playerDropList.Visible = false
     end)
     playerDropBtn.Activated:Connect(function()
@@ -1002,9 +1096,10 @@ do
         playerDropList.Visible = not playerDropList.Visible
         herbDropList.Visible = false
         pillDropList.Visible = false
+        mobDropList.Visible = false
     end)
 
-    createToggleRow(page, 598, "Auto Kill (Lock + Sword & Skills)", State.autoKillActive, Color3.fromRGB(210, 50, 70), function(val)
+    createToggleRow(page, 718, "Auto Kill Player (Lock + Sword & Skills)", State.autoKillActive, Color3.fromRGB(210, 50, 70), function(val)
         State.autoKillActive = val
         Config.autoKillActive = val
         saveConfig()
@@ -1259,7 +1354,7 @@ do
     infoBox.Position = UDim2.new(0, 0, 0, 118)
     infoBox.BackgroundTransparency = 1
     infoBox.TextWrapped = true
-    infoBox.Text = "• Auto Create Pills: Zero-Lag (Tanpa pindah Cauldron berulang) + Deteksi 3 Kolom Slot Presisi + Instant Claim.\n• Auto Realm & Body: Deteksi Animasi & Event (<0.2s langsung aktif saat berhenti).\n• Teleportasi: Otomatis melepas kunci terbang/kultivasi sebelum pindah & lanjut kultivasi di tempat baru."
+    infoBox.Text = "• Auto Create Pills: Menggunakan sistem asli yang sudah berfungsi + Fitur buka Cauldron di mana saja.\n• Autofarm Mob: Teleport & Auto Lock ke Bandit, Bandit Captain, Outer/Inner/Core Disciple, Sect Elder, & World Boss.\n• Location: Melepas kunci terbang/kultivasi otomatis."
     infoBox.TextColor3 = Color3.fromRGB(160, 160, 160)
     infoBox.TextSize = 11
     infoBox.Font = Enum.Font.Gotham
@@ -1275,7 +1370,6 @@ do
     local function refineFloorInsideZone(basePos, zoneName)
         local normTarget = normalizeName(zoneName)
 
-        -- 1. Cek part zona spesifik di CultivationZones / BodyCultivationZones / MapAnchors jika sudah ter-stream
         for _, folderName in ipairs({"CultivationZones", "BodyCultivationZones", "MapAnchors"}) do
             local folder = Workspace:FindFirstChild(folderName)
             if folder then
@@ -1288,7 +1382,6 @@ do
             end
         end
 
-        -- 2. Cek halaman/yard di Landmarks jika sudah ter-stream
         local mapModel = Workspace:FindFirstChild("Map_sacred-mountain")
         local landmarks = mapModel and mapModel:FindFirstChild("Landmarks")
         if landmarks then
@@ -1308,7 +1401,6 @@ do
             end
         end
 
-        -- 3. Raycast ke permukaan lantai agar tidak melayang atau menembus tanah
         local rayParams = RaycastParams.new()
         rayParams.FilterType = Enum.RaycastFilterType.Exclude
         rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
@@ -1320,9 +1412,7 @@ do
         return basePos + Vector3.new(0, 3.0, 0)
     end
 
-    -- Membersihkan semua pengunci gerak (kultivasi, pushup, tween autofarm, sword flight) sebelum teleport
     local function releaseAllMovementLocks(char, root, hum)
-        -- 1. Hentikan Tween Autofarm Herb yang sedang berjalan agar tidak menarik balik karakter
         if State.activeFarmTween then
             pcall(function() State.activeFarmTween:Cancel() end)
             State.activeFarmTween = nil
@@ -1332,7 +1422,6 @@ do
             State.activeFarmVelocity = nil
         end
 
-        -- 2. Hapus semua BodyMover / Constraint terbang pada karakter
         if char then
             for _, desc in pairs(char:GetDescendants()) do
                 if desc:IsA("BodyMover") or desc:IsA("LinearVelocity") or desc:IsA("AlignPosition") or desc:IsA("AlignOrientation") then
@@ -1341,7 +1430,6 @@ do
             end
         end
 
-        -- 3. Lepaskan kunci MovementGuardRules server/client dari Meditasi, Pushup, atau SwordFlight
         pcall(function()
             local stopMedBind = ReplicatedStorage:FindFirstChild("LocalStopMeditate")
             if stopMedBind and stopMedBind:IsA("BindableEvent") then stopMedBind:Fire() end
@@ -1362,7 +1450,6 @@ do
             end
         end)
 
-        -- 4. Reset state Humanoid & RootPart
         if root then
             root.Anchored = false
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -1410,19 +1497,15 @@ do
         end
 
         UI.ZoneStatusLabel.Text = "Melepas kunci gerak/terbang & menyiapkan Teleport ke " .. zoneName .. "..."
-
-        -- Langkah 1: Lepaskan semua pengunci kultivasi / pushup / terbang terlebih dahulu
         releaseAllMovementLocks(char, root, hum)
         task.wait(0.16)
 
-        -- Langkah 2: Minta server men-stream area tujuan
         pcall(function()
             LocalPlayer:RequestStreamAroundAsync(targetCoord, 2.5)
         end)
 
         UI.ZoneStatusLabel.Text = "Teleportasi Instan ke " .. zoneName .. "..."
 
-        -- Langkah 3: Pindahkan karakter secara instan ke koordinat zona
         for _ = 1, 8 do
             root.Anchored = false
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -1434,7 +1517,6 @@ do
 
         task.wait(0.18)
 
-        -- Langkah 4: Presisikan tepat di lantai tengah buff zone setelah objek sekitar ter-render
         local finalBuffPos = refineFloorInsideZone(targetCoord, zoneName)
         for _ = 1, 10 do
             root.Anchored = false
@@ -1445,7 +1527,6 @@ do
             RunService.Heartbeat:Wait()
         end
 
-        -- Langkah 5: Aktifkan kembali Auto Realm atau Auto Body secara instan di zona baru!
         State.lastQiServerTick = 0
         State.lastBodyServerTick = 0
         State.lastRealmTrigger = 0
@@ -1458,10 +1539,9 @@ do
 end
 
 -------------------------------------------------------------------------
--- AUTO REALM (StartMeditate / M) & AUTO BODY (StartPushup / P) - INSTANT RESUME
+-- AUTO REALM (StartMeditate / M) & AUTO BODY (StartPushup / P)
 -------------------------------------------------------------------------
 do
-    -- 1. Dengarkan detak server dan event berhenti untuk responsivitas instan (<0.2s)
     if CultivationEvents then
         local updateClientRem = CultivationEvents:FindFirstChild("UpdateClient")
         if updateClientRem and updateClientRem:IsA("RemoteEvent") then
@@ -1477,7 +1557,6 @@ do
             end)
         end
 
-        -- Jika server mengirim sinyal berhenti/selesai breakthrough, langsung picu resume instan!
         for _, evName in ipairs({
             "StopMeditate", "StopPushup", "BreakthroughEffect",
             "BodyBreakthroughCutsceneDone", "CultivateResumed", "BreakthroughMinigameResult"
@@ -1508,7 +1587,6 @@ do
         end
     end
 
-    -- 2. Fungsi pengecek apakah karakter sedang memainkan animasi Meditasi / Pushup (Non-Idle)
     local function hasActiveCultivationAnimation(char)
         if not char then return false end
         local hum = char:FindFirstChildWhichIsA("Humanoid")
@@ -1536,10 +1614,9 @@ do
         return false
     end
 
-    -- 3. Loop Responsif (Mengecek setiap 0.15 detik, langsung aktif begitu karakter berhenti)
     task.spawn(function()
         while true do
-            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive then
+            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoMobActive and not State.autoKillActive then
                 local char = LocalPlayer.Character
                 local hum = char and char:FindFirstChildWhichIsA("Humanoid")
                 local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1552,7 +1629,6 @@ do
                     State.lastBodyTrigger = 0
                     State.forceImmediateCultivate = true
                 else
-                    -- Jangan tekan M/P hanya jika sedang di tengah minigame Breakthrough Trial
                     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
                     local inTrial = false
                     if playerGui then
@@ -1761,454 +1837,318 @@ task.spawn(function()
 end)
 
 -------------------------------------------------------------------------
--- 2. AUTOCREATE PILLS (ZERO-LAG ANYWHERE + 3-COLUMN SLOT + INSTANT CLAIM)
+-- 2. AUTOCREATE PILLS (KODE LAMA YANG SUDAH BERFUNGSI + ANYWHERE CAULDRON)
 -------------------------------------------------------------------------
-do
-    -- Instant Claim Listener saat server mengirim sinyal selesai masak
-    if CultivationEvents then
-        local brewCompleteRem = CultivationEvents:FindFirstChild("CauldronBrewComplete")
-        if brewCompleteRem and brewCompleteRem:IsA("RemoteEvent") then
-            brewCompleteRem.OnClientEvent:Connect(function()
-                if State.autoPillActive then
-                    pcall(function() CultivationEvents.CauldronClaim:FireServer() end)
-                end
-            end)
-        end
+task.spawn(function()
+    local lastCauldronOpenTick = 0
 
-        local stokeResRem = CultivationEvents:FindFirstChild("CauldronStokeResult")
-        if stokeResRem and stokeResRem:IsA("RemoteEvent") then
-            stokeResRem.OnClientEvent:Connect(function()
-                if State.autoPillActive then
-                    State.isBrewingWaitClaim = true
-                    task.spawn(function()
-                        for _ = 1, 15 do
-                            if not State.autoPillActive then break end
-                            pcall(function() CultivationEvents.CauldronClaim:FireServer() end)
-                            task.wait(0.25)
-                        end
-                    end)
+    local function findElementByText(exactOrPartialText, exactMatch)
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not playerGui then return nil end
+        
+        local targetLower = trimText(exactOrPartialText)
+        for _, obj in pairs(playerGui:GetDescendants()) do
+            if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) then
+                if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                    local textLower = trimText(obj.Text)
+                    if (exactMatch and textLower == targetLower) or (not exactMatch and textLower:find(targetLower, 1, true)) then
+                        return obj
+                    end
                 end
-            end)
+            end
         end
+        return nil
     end
 
-    task.spawn(function()
-        local lastCauldronOpenAttempt = 0
+    -- Membuka UI Alchemy Cauldron dari mana saja tanpa harus mendekati Cauldron secara manual
+    local function openCauldronAnywhereIfNeeded()
+        local cauldronMesh = Workspace:FindFirstChild("CauldronForBrewing")
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
 
-        local function findVisibleTextElement(targetStr, exactMatch)
-            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-            if not playerGui then return nil end
-            local targetLower = trimText(targetStr)
-
-            for _, obj in pairs(playerGui:GetDescendants()) do
-                if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) then
-                    if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
-                        local textLower = trimText(obj.Text)
-                        if (exactMatch and textLower == targetLower) or (not exactMatch and textLower:find(targetLower, 1, true)) then
-                            return obj
-                        end
-                    end
-                end
+        if cauldronMesh and cauldronMesh:IsA("BasePart") and root then
+            -- Jaga Cauldron tetap dekat di bawah tanah karakter agar UI Cauldron tidak tertutup karena jarak
+            if (cauldronMesh.Position - root.Position).Magnitude > 12 then
+                pcall(function()
+                    cauldronMesh.CanCollide = false
+                    cauldronMesh.Transparency = 1
+                    cauldronMesh.Anchored = true
+                    cauldronMesh.CFrame = root.CFrame * CFrame.new(0, -4, 0)
+                end)
             end
-            return nil
         end
 
-        -- Membuka Cauldron dari mana saja TANPA memindahkan Cauldron setiap frame (Bebas Patah-Patah / Lag!)
-        local function openCauldronZeroLag()
-            local isOpen = findVisibleTextElement("alchemy cauldron", false)
-                or findVisibleTextElement("choose a herb", false)
-                or findVisibleTextElement("stoke", true)
+        -- Cek apakah UI Cauldron sudah terbuka di layar
+        if findElementByText("brew", true) or findElementByText("stoke", true) or findElementByText("claim", true) or findElementByText("choose a herb", false) then
+            return true
+        end
 
-            if isOpen then return true end
-            if tick() - lastCauldronOpenAttempt < 2.2 then return false end
-            lastCauldronOpenAttempt = tick()
-
-            local cauldronMesh = Workspace:FindFirstChild("CauldronForBrewing")
-            if cauldronMesh and cauldronMesh:IsA("BasePart") then
-                if not State.cauldronOrigCFrame then
-                    State.cauldronOrigCFrame = cauldronMesh.CFrame
-                end
-
-                local prompt = cauldronMesh:FindFirstChildWhichIsA("ProximityPrompt", true)
-                local char = LocalPlayer.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-
-                if prompt and root then
-                    pcall(function()
-                        prompt.MaxActivationDistance = 100000
-                        prompt.RequiresLineOfSight = false
-                        prompt.HoldDuration = 0
-
-                        -- Pindahkan ke bawah tanah (-12 studs) hanya selama 0.08 detik untuk memicu prompt tanpa menabrak karakter!
-                        cauldronMesh.CanCollide = false
-                        cauldronMesh.Anchored = true
-                        cauldronMesh.CFrame = root.CFrame * CFrame.new(0, -12, 0)
-                    end)
-                    task.wait(0.06)
-                    pcall(function()
-                        if fireproximityprompt then
-                            fireproximityprompt(prompt)
-                        else
-                            prompt:InputHoldBegin()
-                            task.wait(0.05)
-                            prompt:InputHoldEnd()
-                        end
-                    end)
-                end
-            end
+        if tick() - lastCauldronOpenTick < 1.5 then
             return false
         end
+        lastCauldronOpenTick = tick()
 
-        -- Membaca 3 Kolom Slot Cauldron berdasarkan koordinat X relatif terhadap jendela ALCHEMY CAULDRON
-        local function getThreeColumnSlots(brewBtnObj)
-            local cauldronWin = brewBtnObj.Parent
-            while cauldronWin and cauldronWin ~= LocalPlayer.PlayerGui and cauldronWin.AbsoluteSize.Y < 220 do
-                cauldronWin = cauldronWin.Parent
-            end
-            if not cauldronWin then return nil end
-
-            local winX = cauldronWin.AbsolutePosition.X
-            local winW = math.max(cauldronWin.AbsoluteSize.X, 1)
-            local winY = cauldronWin.AbsolutePosition.Y
-            local brewY = brewBtnObj.AbsolutePosition.Y
-
-            local cols = {
-                [1] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false},
-                [2] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false},
-                [3] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false}
-            }
-
-            for _, obj in pairs(cauldronWin:GetDescendants()) do
-                if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
-                    local posY = obj.AbsolutePosition.Y
-                    -- Hanya pindai elemen di area kotak slot (di bawah judul Cauldron dan di atas tombol Brew)
-                    if posY > (winY + 35) and posY < (brewY - 8) then
-                        local centerX = obj.AbsolutePosition.X + (obj.AbsoluteSize.X / 2)
-                        local relX = (centerX - winX) / winW
-
-                        local colIdx = 1
-                        if relX < 0.37 then
-                            colIdx = 1
-                        elseif relX <= 0.63 then
-                            colIdx = 2
-                        else
-                            colIdx = 3
-                        end
-
-                        local t = trimText(obj.Text)
-                        local clickTarget = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj
-
-                        if t:find("add herb", 1, true) then
-                            cols[colIdx].IsEmpty = true
-                            cols[colIdx].AddBtn = clickTarget
-                        elseif t:find("remove", 1, true) then
-                            cols[colIdx].RemoveBtn = clickTarget
-                        else
-                            for _, hName in ipairs(Constants.HERBS_LIST) do
-                                if t == hName:lower() or t:find("^" .. hName:lower() .. "%s") then
-                                    cols[colIdx].FilledHerb = hName
-                                    if not cols[colIdx].RemoveBtn then
-                                        cols[colIdx].RemoveBtn = clickTarget
-                                    end
-                                    break
-                                end
-                            end
-                        end
+        if cauldronMesh then
+            local prompt = cauldronMesh:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then
+                pcall(function()
+                    prompt.MaxActivationDistance = math.huge
+                    prompt.RequiresLineOfSight = false
+                    if fireproximityprompt then
+                        fireproximityprompt(prompt)
+                    else
+                        prompt:InputHoldBegin()
+                        task.wait(0.1)
+                        prompt:InputHoldEnd()
                     end
-                end
+                end)
             end
-
-            return cols
         end
+        return false
+    end
 
-        -- Memilih Herb dari jendela "Choose a herb" berdasarkan kesamaan baris horizontal (Y-Alignment)
-        local function selectHerbFromChooseModal(targetHerbName)
-            local modalHeader = findVisibleTextElement("choose a herb", false)
-            if not modalHeader then return false end
-
-            local modalWin = modalHeader.Parent
-            while modalWin and modalWin ~= LocalPlayer.PlayerGui and modalWin.AbsoluteSize.Y < 200 do
-                modalWin = modalWin.Parent
-            end
-            if not modalWin then modalWin = LocalPlayer.PlayerGui end
-
-            local targetLower = trimText(targetHerbName)
-            local scrollFrame = modalWin:FindFirstChildWhichIsA("ScrollingFrame", true)
-
-            local function findInCurrentView()
-                local candidates = {}
-                local visibleLabels = {}
-
-                for _, obj in pairs(modalWin:GetDescendants()) do
-                    if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
-                        table.insert(visibleLabels, obj)
-                    end
-                end
-
-                for _, obj in ipairs(visibleLabels) do
-                    if trimText(obj.Text) == "choose" then
-                        local chooseBtn = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj
-                        local cY = chooseBtn.AbsolutePosition.Y + (chooseBtn.AbsoluteSize.Y / 2)
-
-                        local lineTexts = {}
-                        for _, other in ipairs(visibleLabels) do
-                            if other ~= obj then
-                                local oY = other.AbsolutePosition.Y + (other.AbsoluteSize.Y / 2)
-                                if math.abs(oY - cY) < 30 then
-                                    table.insert(lineTexts, trimText(other.Text))
+    -- Fungsi asli pemilihan Herb (Prioritas 1000Yr > 100Yr > 10Yr > 1Yr) yang sudah terbukti bekerja
+    local function selectBestHerbFromModal(herbName)
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not playerGui then return false end
+        
+        local herbLower = trimText(herbName)
+        local candidates = {}
+        
+        for _, obj in pairs(playerGui:GetDescendants()) do
+            if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                if trimText(obj.Text) == herbLower then
+                    local row = obj.Parent
+                    for _ = 1, 3 do
+                        if row then
+                            local chooseBtn = nil
+                            local yearScore = 0
+                            local quantity = 1
+                            
+                            for _, child in pairs(row:GetDescendants()) do
+                                if (child:IsA("TextLabel") or child:IsA("TextButton")) then
+                                    local txt = trimText(child.Text)
+                                    if txt == "choose" then
+                                        chooseBtn = child
+                                    elseif txt:find("year") then
+                                        for _, yrData in ipairs(Constants.HERB_YEAR_PRIORITY) do
+                                            if txt:find(yrData.pattern, 1, true) then
+                                                yearScore = math.max(yearScore, yrData.score)
+                                                break
+                                            end
+                                        end
+                                    elseif txt:match("^x%d+") then
+                                        local num = tonumber(txt:match("%d+"))
+                                        if num then quantity = num end
+                                    end
                                 end
                             end
-                        end
-
-                        local combinedLine = table.concat(lineTexts, " ")
-                        local matchedRightHerb = false
-
-                        for _, hName in ipairs(Constants.HERBS_LIST) do
-                            local hLow = hName:lower()
-                            if combinedLine:find(hLow, 1, true) then
-                                if hLow == targetLower then
-                                    matchedRightHerb = true
-                                else
-                                    matchedRightHerb = false
-                                    break
-                                end
-                            end
-                        end
-
-                        if matchedRightHerb then
-                            local yearScore = 1
-                            if combinedLine:find("1000", 1, true) then yearScore = 4
-                            elseif combinedLine:find("100", 1, true) then yearScore = 3
-                            elseif combinedLine:find("10", 1, true) then yearScore = 2 end
-
-                            local qty = 1
-                            local qMatch = combinedLine:match("x(%d+)")
-                            if qMatch then qty = tonumber(qMatch) or 1 end
-
-                            if qty > 0 then
+                            
+                            if chooseBtn and quantity > 0 then
                                 table.insert(candidates, {
-                                    ChooseBtn = chooseBtn,
-                                    Score = yearScore
+                                    Row = row,
+                                    ChooseButton = chooseBtn,
+                                    Score = yearScore,
+                                    Quantity = quantity
                                 })
+                                break
                             end
+                            row = row.Parent
                         end
                     end
                 end
-
-                table.sort(candidates, function(a, b) return a.Score > b.Score end)
-                return candidates[1]
             end
-
-            if scrollFrame then
-                scrollFrame.CanvasPosition = Vector2.new(0, 0)
+        end
+        
+        if #candidates == 0 then return false end
+        
+        table.sort(candidates, function(a, b)
+            return a.Score > b.Score
+        end)
+        
+        local bestCandidate = candidates[1]
+        local targetBtn = bestCandidate.ChooseButton
+        local targetRow = bestCandidate.Row
+        
+        local scrollFrame = targetRow:FindFirstAncestorWhichIsA("ScrollingFrame")
+        if scrollFrame then
+            local sfPosY = scrollFrame.AbsolutePosition.Y
+            local sfSizeY = scrollFrame.AbsoluteSize.Y
+            local rowPosY = targetRow.AbsolutePosition.Y
+            local rowSizeY = targetRow.AbsoluteSize.Y
+            
+            if rowPosY < sfPosY or (rowPosY + rowSizeY) > (sfPosY + sfSizeY) then
+                local relativeOffset = rowPosY - sfPosY
+                scrollFrame.CanvasPosition = Vector2.new(
+                    scrollFrame.CanvasPosition.X,
+                    math.max(0, scrollFrame.CanvasPosition.Y + relativeOffset - (sfSizeY / 3))
+                )
                 task.wait(0.12)
             end
+        end
+        
+        clickGuiElement(targetBtn, false, false)
+        return true
+    end
 
-            local best = findInCurrentView()
+    -- Fungsi asli Minigame Stoke the Fire yang sudah bekerja
+    local function handleStokeMinigame(stokeBtnObj)
+        local modalContainer = stokeBtnObj.Parent
+        while modalContainer and modalContainer ~= LocalPlayer.PlayerGui and modalContainer.AbsoluteSize.Y < 130 do
+            modalContainer = modalContainer.Parent
+        end
+        if not modalContainer then return end
 
-            if not best and scrollFrame then
-                for step = 1, 4 do
-                    scrollFrame.CanvasPosition = Vector2.new(0, step * 150)
-                    task.wait(0.15)
-                    best = findInCurrentView()
-                    if best then break end
+        local stokeY = stokeBtnObj.AbsolutePosition.Y
+        local initialX = {}
+
+        for _, obj in pairs(modalContainer:GetDescendants()) do
+            if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj.AbsolutePosition.Y < stokeY then
+                if obj.AbsoluteSize.X < 180 and obj.AbsoluteSize.Y <= 60 then
+                    initialX[obj] = obj.AbsolutePosition.X
                 end
             end
-
-            if best and best.ChooseBtn then
-                triggerGuiClick(best.ChooseBtn, false, false)
-                return true
-            end
-            return false
         end
 
-        local function handleStokeMinigame(stokeBtnObj)
-            local modalContainer = stokeBtnObj.Parent
-            while modalContainer and modalContainer ~= LocalPlayer.PlayerGui and modalContainer.AbsoluteSize.Y < 130 do
-                modalContainer = modalContainer.Parent
-            end
-            if not modalContainer then return end
+        RunService.RenderStepped:Wait()
+        RunService.RenderStepped:Wait()
+        RunService.RenderStepped:Wait()
 
-            local stokeY = stokeBtnObj.AbsolutePosition.Y
-            local initialX = {}
-            for _, obj in pairs(modalContainer:GetDescendants()) do
-                if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj.AbsolutePosition.Y < stokeY then
-                    if obj.AbsoluteSize.X < 180 and obj.AbsoluteSize.Y <= 60 then
-                        initialX[obj] = obj.AbsolutePosition.X
-                    end
+        local cursorObj = nil
+        local maxDelta = 0
+        for obj, oldX in pairs(initialX) do
+            if obj and obj.Parent then
+                local dX = math.abs(obj.AbsolutePosition.X - oldX)
+                if dX > 0.4 and dX > maxDelta then
+                    maxDelta = dX
+                    cursorObj = obj
                 end
             end
+        end
 
-            RunService.RenderStepped:Wait()
-            RunService.RenderStepped:Wait()
-            RunService.RenderStepped:Wait()
+        local targetZoneObj = nil
+        local barTrackObj = nil
+        local refY = cursorObj and (cursorObj.AbsolutePosition.Y + cursorObj.AbsoluteSize.Y / 2) or (stokeY - 45)
 
-            local cursorObj = nil
-            local maxDelta = 0
-            for obj, oldX in pairs(initialX) do
-                if obj and obj.Parent then
-                    local dX = math.abs(obj.AbsolutePosition.X - oldX)
-                    if dX > 0.4 and dX > maxDelta then
-                        maxDelta = dX
-                        cursorObj = obj
-                    end
-                end
-            end
-
-            local targetZoneObj = nil
-            local barTrackObj = nil
-            local refY = cursorObj and (cursorObj.AbsolutePosition.Y + cursorObj.AbsoluteSize.Y / 2) or (stokeY - 45)
-
-            for _, obj in pairs(modalContainer:GetDescendants()) do
-                if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj ~= cursorObj and (not cursorObj or not obj:IsDescendantOf(cursorObj)) then
-                    local centerY = obj.AbsolutePosition.Y + (obj.AbsoluteSize.Y / 2)
-                    if math.abs(centerY - refY) < 35 then
-                        if obj.AbsoluteSize.X >= 180 and obj.AbsoluteSize.Y <= 50 then
-                            if not barTrackObj or obj.AbsoluteSize.X > barTrackObj.AbsoluteSize.X then barTrackObj = obj end
-                        elseif obj.AbsoluteSize.X >= 6 and obj.AbsoluteSize.X <= 90 and obj.AbsoluteSize.Y <= 45 then
-                            local dX = initialX[obj] and math.abs(obj.AbsolutePosition.X - initialX[obj]) or 0
-                            if dX < 0.2 and (not targetZoneObj or obj.AbsoluteSize.X < targetZoneObj.AbsoluteSize.X) then
+        for _, obj in pairs(modalContainer:GetDescendants()) do
+            if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj ~= cursorObj and (not cursorObj or not obj:IsDescendantOf(cursorObj)) then
+                local centerY = obj.AbsolutePosition.Y + (obj.AbsoluteSize.Y / 2)
+                if math.abs(centerY - refY) < 35 then
+                    if obj.AbsoluteSize.X >= 180 and obj.AbsoluteSize.Y <= 50 then
+                        if not barTrackObj or obj.AbsoluteSize.X > barTrackObj.AbsoluteSize.X then
+                            barTrackObj = obj
+                        end
+                    elseif obj.AbsoluteSize.X >= 6 and obj.AbsoluteSize.X <= 90 and obj.AbsoluteSize.Y <= 45 then
+                        local dX = initialX[obj] and math.abs(obj.AbsolutePosition.X - initialX[obj]) or 0
+                        if dX < 0.2 then
+                            if not targetZoneObj or obj.AbsoluteSize.X < targetZoneObj.AbsoluteSize.X then
                                 targetZoneObj = obj
                             end
                         end
                     end
                 end
             end
+        end
 
-            local startTime = tick()
-            local prevX = cursorObj and (cursorObj.AbsolutePosition.X + cursorObj.AbsoluteSize.X / 2) or nil
+        local startTime = tick()
+        local prevX = cursorObj and (cursorObj.AbsolutePosition.X + cursorObj.AbsoluteSize.X / 2) or nil
 
-            while State.autoPillActive and isActuallyVisible(stokeBtnObj) and (tick() - startTime < 4.0) do
-                if cursorObj then
-                    local curCenter = cursorObj.AbsolutePosition.X + (cursorObj.AbsoluteSize.X / 2)
-                    local velX = prevX and (curCenter - prevX) or 0
-                    prevX = curCenter
-                    local predictedX = curCenter + (velX * 1.15)
+        while State.autoPillActive and isActuallyVisible(stokeBtnObj) and (tick() - startTime < 4.0) do
+            if cursorObj then
+                local curCenter = cursorObj.AbsolutePosition.X + (cursorObj.AbsoluteSize.X / 2)
+                local velX = prevX and (curCenter - prevX) or 0
+                prevX = curCenter
+                local predictedX = curCenter + (velX * 1.15)
 
-                    local zMin, zMax
-                    if targetZoneObj then
-                        local zPos = targetZoneObj.AbsolutePosition.X
-                        local zSize = targetZoneObj.AbsoluteSize.X
-                        local pad = math.min(zSize * 0.2, 6)
-                        zMin = zPos + pad
-                        zMax = (zPos + zSize) - pad
-                    elseif barTrackObj then
-                        local bPos = barTrackObj.AbsolutePosition.X
-                        local bSize = barTrackObj.AbsoluteSize.X
-                        zMin = bPos + (bSize * 0.46)
-                        zMax = bPos + (bSize * 0.54)
-                    end
+                local zMin, zMax
+                if targetZoneObj then
+                    local zPos = targetZoneObj.AbsolutePosition.X
+                    local zSize = targetZoneObj.AbsoluteSize.X
+                    local pad = math.min(zSize * 0.2, 6)
+                    zMin = zPos + pad
+                    zMax = (zPos + zSize) - pad
+                elseif barTrackObj then
+                    local bPos = barTrackObj.AbsolutePosition.X
+                    local bSize = barTrackObj.AbsoluteSize.X
+                    zMin = bPos + (bSize * 0.46)
+                    zMax = bPos + (bSize * 0.54)
+                end
 
-                    if zMin and zMax and ((predictedX >= zMin and predictedX <= zMax) or (curCenter >= zMin and curCenter <= zMax)) then
-                        triggerGuiClick(stokeBtnObj, true, false)
-                        pcall(function()
-                            if CultivationEvents and CultivationEvents:FindFirstChild("CauldronStoke") then
-                                CultivationEvents.CauldronStoke:FireServer(true)
-                            end
-                        end)
+                if zMin and zMax then
+                    if (predictedX >= zMin and predictedX <= zMax) or (curCenter >= zMin and curCenter <= zMax) then
+                        clickGuiElement(stokeBtnObj, true, false)
                         break
                     end
                 end
-                RunService.RenderStepped:Wait()
             end
-
-            State.isBrewingWaitClaim = true
+            RunService.RenderStepped:Wait()
         end
+    end
 
-        while true do
-            if State.autoPillActive and not isUserTypingOrInMenu() and not State.isTeleportingZone then
-                openCauldronZeroLag()
+    -- Loop Utama Auto Create Pills (Kode Lama + Buka Cauldron Anywhere)
+    while true do
+        if State.autoPillActive and not isUserTypingOrInMenu() then
+            openCauldronAnywhereIfNeeded()
 
-                -- STATE 1: Jika tombol Claim pil terlihat di layar
-                local visibleClaim = findVisibleTextElement("claim", true)
-                if visibleClaim then
-                    State.isBrewingWaitClaim = false
-                    pcall(function()
-                        if CultivationEvents and CultivationEvents:FindFirstChild("CauldronClaim") then
-                            CultivationEvents.CauldronClaim:FireServer()
-                        end
-                    end)
-                    triggerGuiClick(visibleClaim, false, false)
-                    task.wait(0.45)
-
-                -- STATE 2: Jika minigame Stoke sedang muncul
+            local claimObj = findElementByText("claim", true)
+            if claimObj then
+                clickGuiElement(claimObj, false, false)
+                task.wait(0.5)
+            else
+                local stokeObj = findElementByText("stoke", true)
+                if stokeObj then
+                    handleStokeMinigame(stokeObj)
+                    task.wait(0.35)
                 else
-                    local stokeObj = findVisibleTextElement("stoke", true)
-                    if stokeObj then
-                        handleStokeMinigame(stokeObj)
-                        task.wait(0.4)
-
-                    -- STATE 3: Jika jendela "Choose a herb" sedang terbuka
-                    elseif findVisibleTextElement("choose a herb", false) then
-                        local recipe = Constants.PILL_RECIPES[State.selectedPill]
-                        local slotIdx = math.clamp(State.activeRecipeSlot or 1, 1, 3)
-                        local requiredHerb = recipe and recipe[slotIdx] or "Ginseng"
-
-                        local chosen = selectHerbFromChooseModal(requiredHerb)
-                        if chosen then
-                            task.wait(0.55)
-                        else
-                            local backBtn = findVisibleTextElement("back", true)
-                            if backBtn then
-                                triggerGuiClick(backBtn, false, false)
-                            end
-                            task.wait(0.55)
+                    local addHerbObj = findElementByText("add herb", true)
+                    local brewObj = findElementByText("brew", true)
+                    
+                    if brewObj then
+                        local backObj = findElementByText("back", true)
+                        if backObj then
+                            clickGuiElement(backObj, false, false)
+                            task.wait(0.3)
                         end
-
-                    -- STATE 4: Menu utama ALCHEMY CAULDRON
-                    else
-                        local brewBtn = findVisibleTextElement("brew", true)
-                        if brewBtn then
-                            local recipe = Constants.PILL_RECIPES[State.selectedPill]
-                            local cols = getThreeColumnSlots(brewBtn)
-
-                            if recipe and cols then
-                                local actionTaken = false
-
-                                for i = 1, 3 do
-                                    local c = cols[i]
-                                    local expectedHerb = recipe[i]
-
-                                    -- Jika kolom ke-i berisi herb yang SALAH, klik "Click to remove" pada kolom tersebut!
-                                    if c.FilledHerb and c.FilledHerb:lower() ~= expectedHerb:lower() and c.RemoveBtn then
-                                        State.activeRecipeSlot = i
-                                        triggerGuiClick(c.RemoveBtn, false, false)
-                                        actionTaken = true
-                                        task.wait(0.5)
-                                        break
-                                    -- Jika kolom ke-i masih kosong ("Add herb"), klik "Add herb" pada kolom tersebut!
-                                    elseif c.IsEmpty and c.AddBtn then
-                                        State.activeRecipeSlot = i
-                                        triggerGuiClick(c.AddBtn, false, false)
-                                        actionTaken = true
-                                        task.wait(0.5)
+                        
+                        local recipe = Constants.PILL_RECIPES[State.selectedPill]
+                        if recipe and addHerbObj then
+                            for slotIdx = 1, 3 do
+                                if not State.autoPillActive or isUserTypingOrInMenu() then break end
+                                
+                                local currentAddHerb = findElementByText("add herb", true)
+                                if currentAddHerb then
+                                    clickGuiElement(currentAddHerb, false, false)
+                                    task.wait(0.38)
+                                    
+                                    local targetHerbName = recipe[slotIdx]
+                                    local chosen = selectBestHerbFromModal(targetHerbName)
+                                    task.wait(0.38)
+                                    
+                                    if not chosen then
+                                        local backBtn = findElementByText("back", true)
+                                        if backBtn then clickGuiElement(backBtn, false, false) end
                                         break
                                     end
                                 end
-
-                                -- Jika ketiga kolom sudah berisi bahan yang 100% sesuai resep, klik Brew!
-                                if not actionTaken and cols[1].FilledHerb and cols[2].FilledHerb and cols[3].FilledHerb then
-                                    State.isBrewingWaitClaim = true
-                                    triggerGuiClick(brewBtn, false, false)
-                                    task.wait(0.6)
-                                end
                             end
-                        elseif State.isBrewingWaitClaim then
-                            -- STATE 5: Menunggu Brewing selesai -> kirim sinyal CauldronClaim di background tanpa lag
-                            pcall(function()
-                                if CultivationEvents and CultivationEvents:FindFirstChild("CauldronClaim") then
-                                    CultivationEvents.CauldronClaim:FireServer()
-                                end
-                            end)
-                            task.wait(0.35)
+                            
+                            task.wait(0.2)
+                            local finalBrewObj = findElementByText("brew", true)
+                            if finalBrewObj and not findElementByText("add herb", true) then
+                                clickGuiElement(finalBrewObj, false, false)
+                                task.wait(0.7)
+                            end
+                        elseif not addHerbObj then
+                            clickGuiElement(brewObj, false, false)
+                            task.wait(0.7)
                         end
                     end
                 end
             end
-            task.wait(0.28)
         end
-    end)
-end
+        task.wait(0.2)
+    end
+end)
 
 -------------------------------------------------------------------------
 -- 3. AUTO BREAKTHROUGH (ISOLATED SHRINKING RING TRACKER + REMOTE SYNC)
@@ -2362,7 +2302,7 @@ task.spawn(function()
                                             if (isRingGoldNow and (hasShrunk or age >= 0.35)) or inSweetSpotSize then
                                                 nData.triggered = true
                                                 triggerKeyPress(cleanChar)
-                                                triggerGuiClick(obj, true, true)
+                                                clickGuiElement(obj, true, true)
                                             end
                                         end
                                     end
@@ -2376,7 +2316,7 @@ task.spawn(function()
                     local isReady = (hud.qiPercent and hud.qiPercent >= 100) or hud.trialReadyBanner
                     if isReady and not isUserTypingOrInMenu() then
                         if hud.breakthroughBtn then
-                            triggerGuiClick(hud.breakthroughBtn, false, false)
+                            clickGuiElement(hud.breakthroughBtn, false, false)
                         end
                         pcall(function()
                             if CultivationEvents then
@@ -2471,7 +2411,7 @@ do
                                                 CultivationEvents.CultivationOrbClicked:FireServer()
                                             end
                                         end)
-                                        triggerGuiClick(obj, false, false)
+                                        clickGuiElement(obj, false, false)
                                         task.wait(0.16)
                                     end
                                 end
@@ -2486,65 +2426,267 @@ do
 end
 
 -------------------------------------------------------------------------
--- 5. AUTO KILL PLAYER (TARGET LOCK + AUTO SWORD + AUTO SKILLS)
+-- 5. AUTOFARM MOB & AUTO KILL PLAYER (TELEPORT + TARGET LOCK + SKILLS)
 -------------------------------------------------------------------------
 do
+    -- Memeriksa apakah sebuah Model adalah Mob hidup yang cocok dengan pilihan
+    local function isMatchingMobModel(model, targetMobName)
+        if not model or not model:IsA("Model") then return false end
+        if Players:GetPlayerFromCharacter(model) then return false end
+
+        local mNameLow = model.Name:lower()
+        if mNameLow:find("dummy") or Constants.FRIENDLY_NPCS[mNameLow] then
+            return false
+        end
+        if model.Parent and model.Parent.Name == "Villagers" then
+            return false
+        end
+
+        local hum = model:FindFirstChildWhichIsA("Humanoid")
+        local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+        if not hum or not root or hum.Health <= 0 then
+            return false
+        end
+
+        local targetLow = targetMobName:lower()
+
+        -- Kumpulkan semua teks identitas mob (Model.Name, DisplayName, Parent.Name, BillboardGui TextLabel, Attributes)
+        local infoParts = {mNameLow, (hum.DisplayName or ""):lower()}
+        if model.Parent and model.Parent ~= Workspace then
+            table.insert(infoParts, model.Parent.Name:lower())
+        end
+        pcall(function()
+            for _, v in pairs(model:GetAttributes()) do
+                table.insert(infoParts, tostring(v):lower())
+            end
+        end)
+        for _, d in pairs(model:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                table.insert(infoParts, (d.Text or ""):lower())
+            end
+        end
+
+        local combinedInfo = table.concat(infoParts, " ")
+
+        -- Pencocokan spesifik agar "Bandit" biasa tidak salah mengambil "Bandit Captain"
+        if targetLow == "bandit" then
+            return combinedInfo:find("bandit", 1, true) and not combinedInfo:find("captain", 1, true)
+        elseif targetLow == "world boss" then
+            return (model.Parent and model.Parent.Name == "WorldBoss") or combinedInfo:find("boss", 1, true) or combinedInfo:find("titan", 1, true) or combinedInfo:find("ancestor", 1, true)
+        else
+            return combinedInfo:find(targetLow, 1, true) ~= nil
+        end
+    end
+
+    -- Mencari Mob terdekat yang masih hidup sesuai pilihan
+    local function findLivingMobTarget(mobName)
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        local myPos = myRoot and myRoot.Position or Vector3.new(0, 0, 0)
+
+        local bestMob = nil
+        local shortestDist = math.huge
+
+        -- Prioritaskan folder BanditCamp, CultivatorCamps, dan WorldBoss terlebih dahulu
+        local priorityFolders = {
+            Workspace:FindFirstChild("BanditCamp"),
+            Workspace:FindFirstChild("CultivatorCamps"),
+            Workspace:FindFirstChild("WorldBoss"),
+            Workspace
+        }
+
+        for _, folder in ipairs(priorityFolders) do
+            if folder then
+                local list = (folder == Workspace) and folder:GetChildren() or folder:GetDescendants()
+                for _, obj in pairs(list) do
+                    if obj:IsA("Model") and isMatchingMobModel(obj, mobName) then
+                        local r = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                        if r then
+                            local d = (r.Position - myPos).Magnitude
+                            if d < shortestDist then
+                                shortestDist = d
+                                bestMob = obj
+                            end
+                        end
+                    end
+                end
+                if bestMob then return bestMob end
+            end
+        end
+
+        return nil
+    end
+
+    -- Jika kemah mob berada jauh dan belum ter-stream, teleport ke titik kemah / NPC penjaga kemah (Garrick/Kess/Lei/Huang/Shen/Mei)
+    local function streamMobCampArea(mobName)
+        local targetLow = mobName:lower()
+        local campTargetObj = nil
+
+        if targetLow:find("bandit") then
+            campTargetObj = Workspace:FindFirstChild("Garrick")
+                or Workspace:FindFirstChild("Kess")
+                or Workspace:FindFirstChild("BanditCamp")
+        elseif targetLow:find("outer") then
+            campTargetObj = Workspace:FindFirstChild("Lei") or Workspace:FindFirstChild("CultivatorCamps")
+        elseif targetLow:find("inner") then
+            campTargetObj = Workspace:FindFirstChild("Huang") or Workspace:FindFirstChild("CultivatorCamps")
+        elseif targetLow:find("core") then
+            campTargetObj = Workspace:FindFirstChild("Shen") or Workspace:FindFirstChild("CultivatorCamps")
+        elseif targetLow:find("elder") then
+            campTargetObj = Workspace:FindFirstChild("Mei") or Workspace:FindFirstChild("CultivatorCamps")
+        elseif targetLow:find("boss") then
+            campTargetObj = Workspace:FindFirstChild("WorldBossArena") or Workspace:FindFirstChild("WorldBoss")
+        end
+
+        if campTargetObj then
+            local pos = nil
+            pcall(function()
+                if campTargetObj:IsA("BasePart") then
+                    pos = campTargetObj.Position
+                elseif campTargetObj:IsA("Model") then
+                    pos = campTargetObj:GetPivot().Position
+                elseif campTargetObj:IsA("Folder") and #campTargetObj:GetChildren() > 0 then
+                    local firstChild = campTargetObj:GetChildren()[1]
+                    if firstChild:IsA("BasePart") then pos = firstChild.Position
+                    elseif firstChild:IsA("Model") then pos = firstChild:GetPivot().Position end
+                end
+            end)
+
+            if pos and pos.Magnitude > 1 then
+                pcall(function() LocalPlayer:RequestStreamAroundAsync(pos, 2) end)
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                if myChar and myRoot then
+                    myRoot.Anchored = false
+                    myChar:PivotTo(CFrame.new(pos + Vector3.new(0, 6, 0)))
+                    myRoot.CFrame = CFrame.new(pos + Vector3.new(0, 6, 0))
+                end
+            end
+        end
+    end
+
+    -- RenderStepped Lock: Mengunci posisi karakter tepat di belakang Target (Mob atau Player)
     RunService.RenderStepped:Connect(function()
-        if State.autoKillActive and State.selectedTargetPlayerName ~= "None" and not State.isTeleportingZone then
+        if State.isTeleportingZone then return end
+
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+
+        -- Prioritas 1: Auto Kill Player
+        if State.autoKillActive and State.selectedTargetPlayerName ~= "None" then
             local targetPlr = Players:FindFirstChild(State.selectedTargetPlayerName)
             if targetPlr and targetPlr.Character then
                 local targetRoot = targetPlr.Character:FindFirstChild("HumanoidRootPart")
                 local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
-                local myChar = LocalPlayer.Character
-                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
-                if targetRoot and myRoot and (not targetHum or targetHum.Health > 0) then
+                if targetRoot and (not targetHum or targetHum.Health > 0) then
                     local lockPos = (targetRoot.CFrame * CFrame.new(0, 0, 3.5)).Position
                     myRoot.CFrame = CFrame.new(lockPos, targetRoot.Position)
-                    myRoot.Velocity = Vector3.new(0, 0, 0)
+                    myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    return
                 end
+            end
+        end
+
+        -- Prioritas 2: Autofarm Mob (Teleport & Auto Lock)
+        if State.autoMobActive and State.currentMobTarget then
+            local mob = State.currentMobTarget
+            local mobRoot = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+            local mobHum = mob:FindFirstChildWhichIsA("Humanoid")
+            if mob.Parent and mobRoot and mobHum and mobHum.Health > 0 then
+                local lockPos = (mobRoot.CFrame * CFrame.new(0, 0, 3.8)).Position
+                myRoot.Anchored = false
+                myRoot.CFrame = CFrame.new(lockPos, mobRoot.Position)
+                myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            else
+                State.currentMobTarget = nil
             end
         end
     end)
 
+    -- Loop Pencari Target Mob & Eksekusi Serangan Pedang + Skill
     task.spawn(function()
         while true do
-            if State.autoKillActive and State.selectedTargetPlayerName ~= "None" and not isUserTypingOrInMenu() and not State.isTeleportingZone then
-                local targetPlr = Players:FindFirstChild(State.selectedTargetPlayerName)
-                if targetPlr and targetPlr.Character then
-                    local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
-                    if not targetHum or targetHum.Health > 0 then
-                        local char = LocalPlayer.Character
-                        if char then
-                            local hum = char:FindFirstChildWhichIsA("Humanoid")
-                            local backpack = LocalPlayer:FindFirstChild("Backpack")
-                            local equippedTool = char:FindFirstChildWhichIsA("Tool")
-                            if not equippedTool and backpack and hum then
-                                for _, item in pairs(backpack:GetChildren()) do
-                                    if item:IsA("Tool") then
-                                        hum:EquipTool(item)
-                                        equippedTool = item
-                                        break
-                                    end
+            local isKillingPlayer = (State.autoKillActive and State.selectedTargetPlayerName ~= "None")
+            local isFarmingMob = State.autoMobActive
+
+            if (isKillingPlayer or isFarmingMob) and not isUserTypingOrInMenu() and not State.isTeleportingZone then
+                local hasValidTarget = false
+
+                if isKillingPlayer then
+                    local targetPlr = Players:FindFirstChild(State.selectedTargetPlayerName)
+                    if targetPlr and targetPlr.Character then
+                        local tHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
+                        if not tHum or tHum.Health > 0 then
+                            hasValidTarget = true
+                        end
+                    end
+                elseif isFarmingMob then
+                    -- Cek apakah target mob saat ini masih hidup
+                    if State.currentMobTarget then
+                        local mHum = State.currentMobTarget:FindFirstChildWhichIsA("Humanoid")
+                        if not State.currentMobTarget.Parent or not mHum or mHum.Health <= 0 then
+                            State.currentMobTarget = nil
+                        end
+                    end
+
+                    -- Cari target mob baru jika belum ada
+                    if not State.currentMobTarget then
+                        State.currentMobTarget = findLivingMobTarget(State.selectedMob)
+                        if not State.currentMobTarget then
+                            streamMobCampArea(State.selectedMob)
+                            task.wait(0.25)
+                            State.currentMobTarget = findLivingMobTarget(State.selectedMob)
+                        end
+                    end
+
+                    if State.currentMobTarget then
+                        hasValidTarget = true
+                    end
+                end
+
+                -- Jika ada target aktif, gunakan pedang & kombo skill otomatis
+                if hasValidTarget then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local hum = char:FindFirstChildWhichIsA("Humanoid")
+                        local backpack = LocalPlayer:FindFirstChild("Backpack")
+                        local equippedTool = char:FindFirstChildWhichIsA("Tool")
+                        if not equippedTool and backpack and hum then
+                            for _, item in pairs(backpack:GetChildren()) do
+                                if item:IsA("Tool") then
+                                    hum:EquipTool(item)
+                                    equippedTool = item
+                                    break
                                 end
                             end
-                            if equippedTool then pcall(function() equippedTool:Activate() end) end
-                            pcall(function()
-                                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-                            end)
                         end
+                        if equippedTool then
+                            pcall(function() equippedTool:Activate() end)
+                        end
+                        pcall(function()
+                            if CultivationEvents then
+                                if CultivationEvents:FindFirstChild("WeaponSwingEvent") then
+                                    CultivationEvents.WeaponSwingEvent:FireServer()
+                                end
+                                if CultivationEvents:FindFirstChild("CombatHit") then
+                                    CultivationEvents.CombatHit:FireServer()
+                                end
+                            end
+                            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+                        end)
+                    end
 
-                        if State.autoSkillKillActive and (tick() - State.lastSkillCycleTime >= 0.35) then
-                            State.lastSkillCycleTime = tick()
-                            local keyToPress = Constants.COMBAT_SKILL_KEYS[State.skillIndex]
-                            State.skillIndex = (State.skillIndex % #Constants.COMBAT_SKILL_KEYS) + 1
-                            pcall(function()
-                                VirtualInputManager:SendKeyEvent(true, keyToPress, false, game)
-                                task.wait(0.02)
-                                VirtualInputManager:SendKeyEvent(false, keyToPress, false, game)
-                            end)
-                        end
+                    if State.autoSkillKillActive and (tick() - State.lastSkillCycleTime >= 0.35) then
+                        State.lastSkillCycleTime = tick()
+                        local keyToPress = Constants.COMBAT_SKILL_KEYS[State.skillIndex]
+                        State.skillIndex = (State.skillIndex % #Constants.COMBAT_SKILL_KEYS) + 1
+                        pcall(function()
+                            VirtualInputManager:SendKeyEvent(true, keyToPress, false, game)
+                            task.wait(0.02)
+                            VirtualInputManager:SendKeyEvent(false, keyToPress, false, game)
+                        end)
                     end
                 end
                 task.wait(0.12)
